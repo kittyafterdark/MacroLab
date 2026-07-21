@@ -1,0 +1,12 @@
+{
+  "version": "1.0.0",
+  "name": "Lumi Macro Lab",
+  "identifier": "lumi_macro_lab",
+  "author": "kittyafterdark",
+  "github": "https://github.com/kittyafterdark/LumiMacroLab",
+  "homepage": "https://github.com/kittyafterdark/LumiMacroLab",
+  "description": "An ephemeral, non-committing macro resolution preview for Lumiverse.",
+  "permissions": ["chats"],
+  "entry_backend": "dist/backend.js",
+  "entry_frontend": "dist/frontend.js"
+}
