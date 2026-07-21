@@ -41,8 +41,9 @@ spindle.onFrontendMessage(async (payload: unknown, userId: string) => {
     const options: {
       chatId?: string
       characterId?: string
+      userId: string
       commit: false
-    } = { commit: false }
+    } = { userId, commit: false }
 
     if (activeChat?.id) options.chatId = activeChat.id
     if (activeChat?.character_id) options.characterId = activeChat.character_id

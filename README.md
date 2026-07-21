@@ -7,6 +7,7 @@ A tiny Lumiverse Spindle extension for previewing macro resolution without savin
 - Adds a **Macro Lab** drawer tab.
 - Resolves pasted Lumiverse macros against the currently active chat when one is available.
 - Uses a dry, non-committing resolve.
+- Passes the requesting user context explicitly, including for operator-scoped installs.
 - Shows macro diagnostics with approximate line and column locations.
 - Keeps all editor text only in the current browser DOM. Reloading the page or disabling the extension clears it.
 

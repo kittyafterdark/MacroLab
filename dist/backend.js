@@ -17,7 +17,7 @@ spindle.onFrontendMessage(async (payload, userId) => {
             throw new Error(`Input is too large (${template.length.toLocaleString()} characters). The preview limit is ${MAX_TEMPLATE_LENGTH.toLocaleString()} characters.`);
         }
         const activeChat = await spindle.chats.getActive();
-        const options = { commit: false };
+        const options = { userId, commit: false };
         if (activeChat?.id)
             options.chatId = activeChat.id;
         if (activeChat?.character_id)
