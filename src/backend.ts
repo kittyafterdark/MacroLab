@@ -37,7 +37,7 @@ spindle.onFrontendMessage(async (payload: unknown, userId: string) => {
       )
     }
 
-    const activeChat = await spindle.chats.getActive()
+    const activeChat = await spindle.chats.getActive(userId)
     const options: {
       chatId?: string
       characterId?: string
