@@ -8,6 +8,15 @@ function isResolveRequest(payload) {
         typeof candidate.requestId === 'string' &&
         typeof candidate.template === 'string');
 }
+function normalizeVariableMap(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+        return {};
+    const normalized = {};
+    for (const [key, entry] of Object.entries(value)) {
+        normalized[key] = typeof entry === 'string' ? entry : String(entry ?? '');
+    }
+    return normalized;
+}
 spindle.onFrontendMessage(async (payload, userId) => {
     if (!isResolveRequest(payload))
         return;
@@ -18,8 +27,18 @@ spindle.onFrontendMessage(async (payload, userId) => {
         }
         const activeChat = await spindle.chats.getActive(userId);
         const options = { userId, commit: false };
-        if (activeChat?.id)
+        let variables = null;
+        if (activeChat?.id) {
             options.chatId = activeChat.id;
+            const [chatVariables, localVariables] = await Promise.all([
+                spindle.variables.chat.list(activeChat.id),
+                spindle.variables.local.list(activeChat.id),
+            ]);
+            variables = {
+                chat: normalizeVariableMap(chatVariables),
+                local: normalizeVariableMap(localVariables),
+            };
+        }
         if (activeChat?.character_id)
             options.characterId = activeChat.character_id;
         const result = await spindle.macros.resolve(template, options);
@@ -37,6 +56,7 @@ spindle.onFrontendMessage(async (payload, userId) => {
                         ? activeChat.name
                         : 'Active chat',
                     hasCharacter: Boolean(activeChat.character_id),
+                    variables,
                 }
                 : null,
         }, userId);

@@ -4,6 +4,11 @@ type MacroDiagnostic = {
   length: number
 }
 
+type VariableSnapshot = {
+  chat: Record<string, string>
+  local: Record<string, string>
+}
+
 type ResolveResult = {
   type: 'lumi_macro_lab:result'
   requestId: string
@@ -12,6 +17,7 @@ type ResolveResult = {
   context: null | {
     name: string
     hasCharacter: boolean
+    variables: VariableSnapshot | null
   }
 }
 
@@ -197,6 +203,57 @@ export function setup(ctx: any) {
       flex: 1;
     }
 
+    .lml-state-panel {
+      border-top: 1px solid var(--lumiverse-border, rgba(127, 127, 127, 0.24));
+      padding-top: 9px;
+    }
+
+    .lml-state-panel[hidden] {
+      display: none;
+    }
+
+    .lml-state-summary {
+      cursor: pointer;
+      color: var(--lumiverse-text-muted, color-mix(in srgb, currentColor 72%, transparent));
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .lml-state-note {
+      margin: 8px 0 0;
+      color: var(--lumiverse-text-muted, color-mix(in srgb, currentColor 68%, transparent));
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .lml-state-grid {
+      display: grid;
+      grid-template-columns: minmax(110px, max-content) minmax(0, 1fr);
+      gap: 5px 10px;
+      margin: 9px 0 0;
+      padding: 9px 10px;
+      background: var(--lumiverse-fill, rgba(0, 0, 0, 0.12));
+      border: 1px solid var(--lumiverse-border, rgba(127, 127, 127, 0.26));
+      border-radius: calc(var(--lumiverse-radius, 12px) - 3px);
+      font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+
+    .lml-state-key,
+    .lml-state-value {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .lml-state-key {
+      font-weight: 700;
+    }
+
+    .lml-state-value {
+      white-space: pre-wrap;
+    }
+
     .lml-diagnostics {
       display: flex;
       flex-direction: column;
@@ -341,6 +398,24 @@ export function setup(ctx: any) {
   diagnosticsList.className = 'lml-diagnostics'
   diagnosticsList.hidden = true
 
+  const statePanel = document.createElement('details')
+  statePanel.className = 'lml-state-panel'
+  statePanel.hidden = true
+
+  const stateSummary = document.createElement('summary')
+  stateSummary.className = 'lml-state-summary'
+  stateSummary.textContent = 'Persisted state before preview'
+
+  const stateNote = document.createElement('p')
+  stateNote.className = 'lml-state-note'
+  stateNote.textContent =
+    'This is the active chat snapshot loaded before the dry run. The pasted template may change these values inside the preview, but nothing is committed.'
+
+  const stateGrid = document.createElement('div')
+  stateGrid.className = 'lml-state-grid'
+
+  statePanel.append(stateSummary, stateNote, stateGrid)
+
   const statusRow = document.createElement('div')
   statusRow.className = 'lml-status-row'
 
@@ -356,6 +431,7 @@ export function setup(ctx: any) {
     output,
     diagnosticsLabel,
     diagnosticsList,
+    statePanel,
     statusRow,
   )
 
@@ -386,6 +462,9 @@ export function setup(ctx: any) {
     diagnosticsLabel.hidden = true
     diagnosticsList.hidden = true
     diagnosticsList.replaceChildren()
+    statePanel.hidden = true
+    statePanel.open = false
+    stateGrid.replaceChildren()
   }
 
   const renderDiagnostics = (template: string, diagnostics: MacroDiagnostic[]) => {
@@ -407,6 +486,48 @@ export function setup(ctx: any) {
       diagnosticsList.appendChild(item)
     }
   }
+
+  const renderVariableSnapshot = (snapshot: VariableSnapshot | null) => {
+    stateGrid.replaceChildren()
+
+    if (!snapshot) {
+      statePanel.hidden = true
+      return
+    }
+
+    const chatEntries = Object.entries(snapshot.chat).sort(([a], [b]) => a.localeCompare(b))
+    const localEntries = Object.entries(snapshot.local).sort(([a], [b]) => a.localeCompare(b))
+
+    if (!chatEntries.length && !localEntries.length) {
+      statePanel.hidden = false
+      const empty = document.createElement('span')
+      empty.className = 'lml-state-value'
+      empty.textContent = 'No persisted chat or local variables were found.'
+      stateGrid.append(empty)
+      return
+    }
+
+    const appendEntry = (prefix: string, key: string, value: string) => {
+      const keyNode = document.createElement('span')
+      keyNode.className = 'lml-state-key'
+      keyNode.textContent = `${prefix}${key}`
+
+      const valueNode = document.createElement('span')
+      valueNode.className = 'lml-state-value'
+      valueNode.textContent = value === '' ? '""' : value
+
+      stateGrid.append(keyNode, valueNode)
+    }
+
+    for (const [key, value] of chatEntries) appendEntry('@', key, value)
+    for (const [key, value] of localEntries) appendEntry('', key, value)
+
+    statePanel.hidden = false
+  }
+
+  const templateMutatesChatState = (template: string): boolean =>
+    /{{\s*@[^{}\s]+\s*(?:=|\+=|-=|\+\+|--)/.test(template) ||
+    /{{\s*(?:setchatvar|incchatvar|decchatvar|addchatvar|deletechatvar)::/i.test(template)
 
   const resolve = () => {
     const template = editor.value
@@ -491,6 +612,7 @@ export function setup(ctx: any) {
       output.textContent = result.text
       copyButton.disabled = result.text.length === 0
       renderDiagnostics(editor.value, Array.isArray(result.diagnostics) ? result.diagnostics : [])
+      renderVariableSnapshot(result.context?.variables ?? null)
 
       const contextMessage = result.context
         ? `Resolved using “${result.context.name}”${result.context.hasCharacter ? '' : ' (no character attached)'}.`
@@ -498,8 +620,11 @@ export function setup(ctx: any) {
       const diagnosticMessage = result.diagnostics.length
         ? ` ${result.diagnostics.length} diagnostic${result.diagnostics.length === 1 ? '' : 's'} found.`
         : ' No diagnostics.'
+      const mutationMessage = templateMutatesChatState(editor.value)
+        ? ' The pasted template mutates chat state; compare the starting snapshot below with the resolved output.'
+        : ''
 
-      setStatus(`${contextMessage}${diagnosticMessage}`, 'success')
+      setStatus(`${contextMessage}${diagnosticMessage}${mutationMessage}`, 'success')
       return
     }
 

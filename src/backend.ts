@@ -12,6 +12,11 @@ type MacroDiagnostic = {
   length: number
 }
 
+type VariableSnapshot = {
+  chat: Record<string, string>
+  local: Record<string, string>
+}
+
 const MAX_TEMPLATE_LENGTH = 500_000
 
 function isResolveRequest(payload: unknown): payload is ResolveRequest {
@@ -23,6 +28,17 @@ function isResolveRequest(payload: unknown): payload is ResolveRequest {
     typeof candidate.requestId === 'string' &&
     typeof candidate.template === 'string'
   )
+}
+
+function normalizeVariableMap(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+
+  const normalized: Record<string, string> = {}
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    normalized[key] = typeof entry === 'string' ? entry : String(entry ?? '')
+  }
+
+  return normalized
 }
 
 spindle.onFrontendMessage(async (payload: unknown, userId: string) => {
@@ -45,7 +61,22 @@ spindle.onFrontendMessage(async (payload: unknown, userId: string) => {
       commit: false
     } = { userId, commit: false }
 
-    if (activeChat?.id) options.chatId = activeChat.id
+    let variables: VariableSnapshot | null = null
+
+    if (activeChat?.id) {
+      options.chatId = activeChat.id
+
+      const [chatVariables, localVariables] = await Promise.all([
+        spindle.variables.chat.list(activeChat.id),
+        spindle.variables.local.list(activeChat.id),
+      ])
+
+      variables = {
+        chat: normalizeVariableMap(chatVariables),
+        local: normalizeVariableMap(localVariables),
+      }
+    }
+
     if (activeChat?.character_id) options.characterId = activeChat.character_id
 
     const result = await spindle.macros.resolve(template, options)
@@ -66,6 +97,7 @@ spindle.onFrontendMessage(async (payload: unknown, userId: string) => {
                   ? activeChat.name
                   : 'Active chat',
               hasCharacter: Boolean(activeChat.character_id),
+              variables,
             }
           : null,
       },

@@ -9,6 +9,7 @@ A tiny Lumiverse Spindle extension for previewing macro resolution without savin
 - Uses a dry, non-committing resolve.
 - Passes the requesting user context explicitly, including for operator-scoped installs.
 - Shows macro diagnostics with approximate line and column locations.
+- Shows the active chat's persisted `@` chat variables and local variables as a before-preview snapshot, making stale state or in-template resets obvious.
 - Keeps all editor text only in the current browser DOM. Reloading the page or disabling the extension clears it.
 
 ## Install
