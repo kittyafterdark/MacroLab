@@ -1,120 +1,882 @@
 declare const spindle: any
 
-type ResolveRequest = {
-  type: 'lumi_macro_lab:resolve'
-  requestId: string
-  template: string
-}
-
 type MacroDiagnostic = {
   message: string
   offset: number
   length: number
 }
 
+type VariableScope = 'local' | 'chat' | 'global'
+
 type VariableSnapshot = {
   chat: Record<string, string>
   local: Record<string, string>
+  global: Record<string, string>
 }
 
+type MacroDefinition = {
+  name: string
+  description: string
+  body: string
+  createdAt: string
+  updatedAt: string
+}
+
+type RegistryFile = {
+  version: 1
+  macros: MacroDefinition[]
+}
+
+type DecisionKind = 'pick' | 'random'
+
+type DecisionState = {
+  version: 1
+  macroName: string
+  instance: string
+  decisionId: string
+  kind: DecisionKind
+  value: string
+  locked: boolean
+  updatedAt: string
+  choiceIndex?: number
+  optionCount?: number
+  options?: string[]
+  args?: string[]
+}
+
+type ResolveRequest = {
+  type: 'lumi_macro_lab:resolve'
+  requestId: string
+  template: string
+}
+
+type GetStateRequest = {
+  type: 'lumi_macro_lab:get_state'
+  requestId: string
+}
+
+type SaveMacroRequest = {
+  type: 'lumi_macro_lab:save_macro'
+  requestId: string
+  originalName?: string
+  definition: {
+    name: string
+    description?: string
+    body: string
+  }
+}
+
+type DeleteMacroRequest = {
+  type: 'lumi_macro_lab:delete_macro'
+  requestId: string
+  name: string
+}
+
+type DecisionActionRequest = {
+  type: 'lumi_macro_lab:decision_action'
+  requestId: string
+  key: string
+  action: 'reroll' | 'toggle_lock' | 'reset'
+}
+
+type InstanceActionRequest = {
+  type: 'lumi_macro_lab:instance_action'
+  requestId: string
+  macroName: string
+  instance: string
+  action: 'reroll' | 'reset'
+}
+
+type VariableActionRequest = {
+  type: 'lumi_macro_lab:variable_action'
+  requestId: string
+  scope: VariableScope
+  action: 'set' | 'delete'
+  key: string
+  value?: string
+}
+
+type FrontendRequest =
+  | ResolveRequest
+  | GetStateRequest
+  | SaveMacroRequest
+  | DeleteMacroRequest
+  | DecisionActionRequest
+  | InstanceActionRequest
+  | VariableActionRequest
+
+const REGISTRY_PATH = 'macro-registry.json'
+const STATE_PREFIX = '__lml_state__'
+const INTERNAL_PICK = 'lmlDecisionPick'
+const INTERNAL_RANDOM = 'lmlDecisionRandom'
 const MAX_TEMPLATE_LENGTH = 500_000
+const MAX_MACRO_BODY_LENGTH = 250_000
+const MAX_MACRO_NAME_LENGTH = 64
+const MAX_INSTANCE_LENGTH = 256
+const MAX_DESCRIPTION_LENGTH = 500
+const MACRO_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]*$/
 
-function isResolveRequest(payload: unknown): payload is ResolveRequest {
-  if (!payload || typeof payload !== 'object') return false
+const registry = new Map<string, MacroDefinition>()
+const liveDecisionCache = new Map<string, DecisionState>()
 
-  const candidate = payload as Partial<ResolveRequest>
-  return (
-    candidate.type === 'lumi_macro_lab:resolve' &&
-    typeof candidate.requestId === 'string' &&
-    typeof candidate.template === 'string'
-  )
+function nowIso(): string {
+  return new Date().toISOString()
 }
 
 function normalizeVariableMap(value: unknown): Record<string, string> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
-
   const normalized: Record<string, string> = {}
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
     normalized[key] = typeof entry === 'string' ? entry : String(entry ?? '')
   }
-
   return normalized
 }
 
-spindle.onFrontendMessage(async (payload: unknown, userId: string) => {
-  if (!isResolveRequest(payload)) return
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
 
-  const { requestId, template } = payload
+function isFrontendRequest(payload: unknown): payload is FrontendRequest {
+  if (!isRecord(payload) || typeof payload.type !== 'string' || typeof payload.requestId !== 'string') {
+    return false
+  }
+  return payload.type.startsWith('lumi_macro_lab:')
+}
 
+function validateMacroDefinition(input: SaveMacroRequest['definition']): { name: string; description: string; body: string } {
+  const name = String(input?.name ?? '').trim()
+  const description = String(input?.description ?? '').trim()
+  const body = String(input?.body ?? '')
+
+  if (!name) throw new Error('Macro name is required.')
+  if (name.length > MAX_MACRO_NAME_LENGTH) {
+    throw new Error(`Macro names are limited to ${MAX_MACRO_NAME_LENGTH} characters.`)
+  }
+  if (!MACRO_NAME_RE.test(name)) {
+    throw new Error('Macro names must start with a letter and contain only letters, numbers, _ or -.')
+  }
+  if (name === INTERNAL_PICK || name === INTERNAL_RANDOM || name.startsWith('lmlDecision')) {
+    throw new Error('That macro name is reserved by Lumi Macro Lab.')
+  }
+  if (name.toLowerCase() === 'pick' || name.toLowerCase() === 'random') {
+    throw new Error('pick and random are native Lumi macros and cannot be replaced by Macro Lab.')
+  }
+  if (!body.trim()) throw new Error('Macro body cannot be empty.')
+  if (body.length > MAX_MACRO_BODY_LENGTH) {
+    throw new Error(`Macro bodies are limited to ${MAX_MACRO_BODY_LENGTH.toLocaleString()} characters.`)
+  }
+  if (description.length > MAX_DESCRIPTION_LENGTH) {
+    throw new Error(`Descriptions are limited to ${MAX_DESCRIPTION_LENGTH} characters.`)
+  }
+
+  return { name, description, body }
+}
+
+function encodeMeta(value: string): string {
+  return encodeURIComponent(value)
+}
+
+function decodeMeta(value: string | undefined, fallback: string): string {
+  if (!value) return fallback
   try {
-    if (template.length > MAX_TEMPLATE_LENGTH) {
-      throw new Error(
-        `Input is too large (${template.length.toLocaleString()} characters). The preview limit is ${MAX_TEMPLATE_LENGTH.toLocaleString()} characters.`,
-      )
-    }
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
 
-    const activeChat = await spindle.chats.getActive(userId)
-    const options: {
-      chatId?: string
-      characterId?: string
-      userId: string
-      commit: false
-    } = { userId, commit: false }
+function normalizeInstance(args: unknown): string {
+  const values = Array.isArray(args) ? args.map((value) => String(value ?? '')) : []
+  const joined = values.join('::').trim()
+  const instance = joined || 'default'
+  return instance.length > MAX_INSTANCE_LENGTH ? instance.slice(0, MAX_INSTANCE_LENGTH) : instance
+}
 
-    let variables: VariableSnapshot | null = null
+function fnv1a(value: string): string {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash >>> 0).toString(36)
+}
 
-    if (activeChat?.id) {
-      options.chatId = activeChat.id
+function decisionKey(macroName: string, instance: string, decisionId: string): string {
+  return `${STATE_PREFIX}${fnv1a(`${macroName}\u0000${instance}`)}_${decisionId}`
+}
 
-      const [chatVariables, localVariables] = await Promise.all([
-        spindle.variables.chat.list(activeChat.id),
-        spindle.variables.local.list(activeChat.id),
-      ])
+function cacheKey(chatId: string, key: string): string {
+  return `${chatId}\u0000${key}`
+}
 
-      variables = {
-        chat: normalizeVariableMap(chatVariables),
-        local: normalizeVariableMap(localVariables),
+function serializeDecision(state: DecisionState): string {
+  return encodeURIComponent(JSON.stringify(state))
+}
+
+function parseDecision(value: unknown): DecisionState | null {
+  if (typeof value !== 'string' || !value) return null
+  try {
+    let source = value
+    if (!source.trim().startsWith('{')) {
+      try {
+        source = decodeURIComponent(source)
+      } catch {
+        // Backward/foreign values may already be plain JSON.
       }
     }
+    const parsed = JSON.parse(source) as Partial<DecisionState>
+    if (
+      parsed.version !== 1 ||
+      typeof parsed.macroName !== 'string' ||
+      typeof parsed.instance !== 'string' ||
+      typeof parsed.decisionId !== 'string' ||
+      (parsed.kind !== 'pick' && parsed.kind !== 'random') ||
+      typeof parsed.value !== 'string'
+    ) {
+      return null
+    }
+    return {
+      version: 1,
+      macroName: parsed.macroName,
+      instance: parsed.instance,
+      decisionId: parsed.decisionId,
+      kind: parsed.kind,
+      value: parsed.value,
+      locked: Boolean(parsed.locked),
+      updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : nowIso(),
+      choiceIndex: typeof parsed.choiceIndex === 'number' ? parsed.choiceIndex : undefined,
+      optionCount: typeof parsed.optionCount === 'number' ? parsed.optionCount : undefined,
+      options: Array.isArray(parsed.options) ? parsed.options.map((entry) => String(entry ?? '')) : undefined,
+      args: Array.isArray(parsed.args) ? parsed.args.map((entry) => String(entry ?? '')) : undefined,
+    }
+  } catch {
+    return null
+  }
+}
 
-    if (activeChat?.character_id) options.characterId = activeChat.character_id
+function readEnvChatVariable(ctx: any, key: string): string | undefined {
+  const vars = ctx?.env?.variables?.chat
+  if (!vars) return undefined
+  try {
+    if (typeof vars.get === 'function') {
+      const value = vars.get(key)
+      return value == null ? undefined : String(value)
+    }
+    if (isRecord(vars) && key in vars) return String(vars[key] ?? '')
+  } catch {
+    // Environment mirrors can be read-only/proxied. Cache + native storage is our fallback.
+  }
+  return undefined
+}
 
-    const result = await spindle.macros.resolve(template, options)
-    const diagnostics: MacroDiagnostic[] = Array.isArray(result?.diagnostics)
-      ? result.diagnostics
-      : []
+function writeEnvChatVariable(ctx: any, key: string, value: string | null): void {
+  const vars = ctx?.env?.variables?.chat
+  if (!vars) return
+  try {
+    if (value === null && typeof vars.delete === 'function') vars.delete(key)
+    else if (value !== null && typeof vars.set === 'function') vars.set(key, value)
+    else if (isRecord(vars)) {
+      if (value === null) delete vars[key]
+      else vars[key] = value
+    }
+  } catch {
+    // Best effort only; Spindle's native variable API remains authoritative.
+  }
+}
 
-    spindle.sendToFrontend(
-      {
-        type: 'lumi_macro_lab:result',
-        requestId,
-        text: typeof result?.text === 'string' ? result.text : '',
-        diagnostics,
-        context: activeChat
-          ? {
-              name:
-                typeof activeChat.name === 'string' && activeChat.name.trim()
-                  ? activeChat.name
-                  : 'Active chat',
-              hasCharacter: Boolean(activeChat.character_id),
-              variables,
-            }
-          : null,
-      },
+function contextIds(ctx: any): { chatId: string; characterId: string; userId: string } {
+  const chatId = String(ctx?.env?.chat?.id ?? ctx?.env?.extra?.chatId ?? '')
+  const characterId = String(ctx?.env?.character?.id ?? ctx?.env?.extra?.characterId ?? '')
+  const userId = String(ctx?.env?.extra?.userId ?? ctx?.userId ?? '')
+  return { chatId, characterId, userId }
+}
+
+function randomIndex(length: number): number {
+  if (length <= 1) return 0
+  return Math.floor(Math.random() * length)
+}
+
+function differentRandomIndex(length: number, current: number | undefined): number {
+  if (length <= 1) return 0
+  if (typeof current !== 'number' || current < 0 || current >= length) return randomIndex(length)
+  const offset = 1 + Math.floor(Math.random() * (length - 1))
+  return (current + offset) % length
+}
+
+
+function sameStringArray(left: string[] | undefined, right: string[]): boolean {
+  return Boolean(left) && left!.length === right.length && left!.every((value, index) => value === right[index])
+}
+
+function instrumentBody(body: string, macroName: string, instance: string): string {
+  let ordinal = 0
+  const encodedMacro = encodeMeta(macroName)
+  const encodedInstance = encodeMeta(instance)
+
+  return body.replace(/{{\s*(pick|random)(?=\s*(?:::|}}))/gi, (_match, rawKind: string) => {
+    const kind = rawKind.toLowerCase() === 'pick' ? INTERNAL_PICK : INTERNAL_RANDOM
+    const decisionId = `d${ordinal}`
+    ordinal += 1
+    return `{{${kind}::${encodedMacro}::${encodedInstance}::${decisionId}`
+  })
+}
+
+function decisionFromContext(ctx: any, key: string, expected: { macroName: string; instance: string; decisionId: string }): DecisionState | null {
+  const { chatId } = contextIds(ctx)
+  const fromEnv = parseDecision(readEnvChatVariable(ctx, key))
+  const fromCache = chatId ? liveDecisionCache.get(cacheKey(chatId, key)) ?? null : null
+  const decision = fromEnv ?? fromCache
+  if (!decision) return null
+  if (
+    decision.macroName !== expected.macroName ||
+    decision.instance !== expected.instance ||
+    decision.decisionId !== expected.decisionId
+  ) {
+    return null
+  }
+  return decision
+}
+
+function stageDecisionWrite(ctx: any, key: string, decision: DecisionState): string {
+  const { chatId } = contextIds(ctx)
+  if (!chatId) return ''
+  const serialized = serializeDecision(decision)
+
+  // Let Lumi mutate the current macro environment itself. Returning setchatvar
+  // keeps the write in the same evaluator pass, so prompt assembly owns the
+  // final flush and commit:false remains genuinely non-persistent.
+  writeEnvChatVariable(ctx, key, serialized)
+  if (ctx?.commit !== false) liveDecisionCache.set(cacheKey(chatId, key), decision)
+  return `{{setchatvar::${key}::${serialized}}}`
+}
+
+async function sampleNativeRandom(
+  args: string[],
+  context: { chatId?: string; characterId?: string; userId?: string } = {},
+): Promise<string> {
+  const macro = `{{random${args.length ? `::${args.join('::')}` : ''}}}`
+  try {
+    const result = await spindle.macros.resolve(macro, {
+      ...(context.chatId ? { chatId: context.chatId } : {}),
+      ...(context.characterId ? { characterId: context.characterId } : {}),
+      ...(context.userId ? { userId: context.userId } : {}),
+      commit: false,
+    })
+    if (typeof result?.text === 'string' && result.text !== macro) return result.text
+  } catch {
+    // Fall through to a small compatibility sampler.
+  }
+
+  if (args.length >= 2) {
+    const low = Number(args[0])
+    const high = Number(args[1])
+    if (Number.isFinite(low) && Number.isFinite(high)) {
+      const min = Math.min(low, high)
+      const max = Math.max(low, high)
+      if (Number.isInteger(min) && Number.isInteger(max)) {
+        return String(min + Math.floor(Math.random() * (max - min + 1)))
+      }
+      return String(min + Math.random() * (max - min))
+    }
+  }
+  return String(Math.random())
+}
+
+async function rerollNativeRandom(args: string[], previous: string, context: { chatId?: string; characterId?: string; userId?: string }): Promise<string> {
+  let value = await sampleNativeRandom(args, context)
+  for (let attempt = 0; attempt < 4 && value === previous; attempt += 1) {
+    value = await sampleNativeRandom(args, context)
+  }
+  return value
+}
+
+function registerInternalMacros(): void {
+  spindle.registerMacro({
+    name: INTERNAL_PICK,
+    category: 'extension:lumi_macro_lab/internal',
+    description: 'Internal sticky pick node used by Lumi Macro Lab.',
+    returnType: 'string',
+    volatile: true,
+    handler: async (ctx: any) => {
+      const args = Array.isArray(ctx?.args) ? ctx.args.map((value: unknown) => String(value ?? '')) : []
+      const macroName = decodeMeta(args[0], 'unknown')
+      const instance = decodeMeta(args[1], 'default')
+      const decisionId = args[2] || 'd0'
+      const options = args.slice(3)
+      if (!options.length) return ''
+
+      const key = decisionKey(macroName, instance, decisionId)
+      const expected = { macroName, instance, decisionId }
+      const previous = decisionFromContext(ctx, key, expected)
+      let choiceIndex = previous?.kind === 'pick' ? previous.choiceIndex : undefined
+      if (typeof choiceIndex !== 'number' || choiceIndex < 0 || choiceIndex >= options.length) {
+        choiceIndex = randomIndex(options.length)
+      }
+      const value = options[choiceIndex] ?? ''
+
+      if (!previous || previous.kind !== 'pick' || !sameStringArray(previous.options, options) || previous.value !== value) {
+        const next: DecisionState = {
+          version: 1,
+          macroName,
+          instance,
+          decisionId,
+          kind: 'pick',
+          value,
+          locked: Boolean(previous?.locked),
+          updatedAt: nowIso(),
+          choiceIndex,
+          optionCount: options.length,
+          options,
+        }
+        return `${stageDecisionWrite(ctx, key, next)}${value}`
+      }
+      return value
+    },
+  })
+
+  spindle.registerMacro({
+    name: INTERNAL_RANDOM,
+    category: 'extension:lumi_macro_lab/internal',
+    description: 'Internal sticky random node used by Lumi Macro Lab.',
+    returnType: 'string',
+    volatile: true,
+    handler: async (ctx: any) => {
+      const args = Array.isArray(ctx?.args) ? ctx.args.map((value: unknown) => String(value ?? '')) : []
+      const macroName = decodeMeta(args[0], 'unknown')
+      const instance = decodeMeta(args[1], 'default')
+      const decisionId = args[2] || 'd0'
+      const randomArgs = args.slice(3)
+      const key = decisionKey(macroName, instance, decisionId)
+      const expected = { macroName, instance, decisionId }
+      const previous = decisionFromContext(ctx, key, expected)
+      if (previous?.kind === 'random') {
+        if (sameStringArray(previous.args, randomArgs)) return previous.value
+        const refreshed: DecisionState = { ...previous, args: randomArgs, updatedAt: nowIso() }
+        return `${stageDecisionWrite(ctx, key, refreshed)}${previous.value}`
+      }
+
+      const ids = contextIds(ctx)
+      const value = await sampleNativeRandom(randomArgs, ids)
+      const next: DecisionState = {
+        version: 1,
+        macroName,
+        instance,
+        decisionId,
+        kind: 'random',
+        value,
+        locked: false,
+        updatedAt: nowIso(),
+        args: randomArgs,
+      }
+      return `${stageDecisionWrite(ctx, key, next)}${value}`
+    },
+  })
+}
+
+function registerUserMacro(name: string): void {
+  spindle.registerMacro({
+    name,
+    category: 'extension:lumi_macro_lab',
+    description: registry.get(name)?.description || `Registered in Lumi Macro Lab. Use {{${name}}} or {{${name}::instance}}.`,
+    returnType: 'string',
+    volatile: true,
+    handler: (ctx: any) => {
+      const definition = registry.get(name)
+      if (!definition) return ''
+      const instance = normalizeInstance(ctx?.args)
+      return instrumentBody(definition.body, name, instance)
+    },
+  })
+}
+
+async function persistRegistry(): Promise<void> {
+  const payload: RegistryFile = {
+    version: 1,
+    macros: [...registry.values()].sort((a, b) => a.name.localeCompare(b.name)),
+  }
+  await spindle.storage.setJson(REGISTRY_PATH, payload, { indent: 2 })
+}
+
+async function loadRegistry(): Promise<void> {
+  const stored = await spindle.storage.getJson(REGISTRY_PATH, {
+    fallback: { version: 1, macros: [] } satisfies RegistryFile,
+  })
+  const macros = Array.isArray(stored?.macros) ? stored.macros : []
+  for (const raw of macros) {
+    try {
+      const checked = validateMacroDefinition(raw)
+      const createdAt = typeof raw?.createdAt === 'string' ? raw.createdAt : nowIso()
+      const updatedAt = typeof raw?.updatedAt === 'string' ? raw.updatedAt : createdAt
+      const definition: MacroDefinition = { ...checked, createdAt, updatedAt }
+      registry.set(definition.name, definition)
+      try {
+        registerUserMacro(definition.name)
+      } catch (error) {
+        registry.delete(definition.name)
+        spindle.log.warn(`Could not register stored macro ${definition.name}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    } catch (error) {
+      spindle.log.warn(`Skipped invalid stored macro: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+}
+
+async function initialize(): Promise<void> {
+  registerInternalMacros()
+  await loadRegistry()
+  spindle.log.info(`Lumi Macro Lab loaded (${registry.size} registered macro${registry.size === 1 ? '' : 's'})`)
+}
+
+const ready = initialize()
+
+async function activeContext(userId: string): Promise<{
+  activeChat: any
+  variables: VariableSnapshot
+  decisions: Array<{ key: string; state: DecisionState }>
+}> {
+  const activeChat = await spindle.chats.getActive(userId)
+  const [globalVariables, chatVariables, localVariables] = await Promise.all([
+    spindle.variables.global.list(),
+    activeChat?.id ? spindle.variables.chat.list(activeChat.id) : Promise.resolve({}),
+    activeChat?.id ? spindle.variables.local.list(activeChat.id) : Promise.resolve({}),
+  ])
+
+  const chatMap = normalizeVariableMap(chatVariables)
+  const decisions: Array<{ key: string; state: DecisionState }> = []
+  const visibleChat: Record<string, string> = {}
+  for (const [key, value] of Object.entries(chatMap)) {
+    if (key.startsWith(STATE_PREFIX)) {
+      const state = parseDecision(value)
+      if (state) decisions.push({ key, state })
+      continue
+    }
+    visibleChat[key] = value
+  }
+
+  decisions.sort((a, b) => {
+    const macro = a.state.macroName.localeCompare(b.state.macroName)
+    if (macro) return macro
+    const instance = a.state.instance.localeCompare(b.state.instance)
+    if (instance) return instance
+    return a.state.decisionId.localeCompare(b.state.decisionId, undefined, { numeric: true })
+  })
+
+  return {
+    activeChat,
+    variables: {
+      chat: visibleChat,
+      local: normalizeVariableMap(localVariables),
+      global: normalizeVariableMap(globalVariables),
+    },
+    decisions,
+  }
+}
+
+async function sendState(userId: string, requestId: string, notice?: string): Promise<void> {
+  const { activeChat, variables, decisions } = await activeContext(userId)
+  spindle.sendToFrontend(
+    {
+      type: 'lumi_macro_lab:state',
+      requestId,
+      notice: notice ?? '',
+      macros: [...registry.values()].sort((a, b) => a.name.localeCompare(b.name)),
+      decisions,
+      variables,
+      context: activeChat
+        ? {
+            id: activeChat.id,
+            name: typeof activeChat.name === 'string' && activeChat.name.trim() ? activeChat.name : 'Active chat',
+            hasCharacter: Boolean(activeChat.character_id),
+          }
+        : null,
+    },
+    userId,
+  )
+}
+
+async function saveMacro(request: SaveMacroRequest): Promise<string> {
+  const checked = validateMacroDefinition(request.definition)
+  const originalName = String(request.originalName ?? '').trim()
+  const priorOriginal = originalName ? registry.get(originalName) : undefined
+  const priorTarget = registry.get(checked.name)
+
+  if (priorTarget && originalName && originalName !== checked.name) {
+    throw new Error(`A Macro Lab macro named “${checked.name}” already exists.`)
+  }
+
+  const timestamp = nowIso()
+  const next: MacroDefinition = {
+    ...checked,
+    createdAt: priorOriginal?.createdAt ?? priorTarget?.createdAt ?? timestamp,
+    updatedAt: timestamp,
+  }
+
+  if (originalName && originalName !== checked.name && priorOriginal) {
+    spindle.unregisterMacro(originalName)
+    registry.delete(originalName)
+  }
+  if (registry.has(checked.name)) spindle.unregisterMacro(checked.name)
+  registry.set(checked.name, next)
+
+  try {
+    registerUserMacro(checked.name)
+    await persistRegistry()
+  } catch (error) {
+    registry.delete(checked.name)
+    try {
+      spindle.unregisterMacro(checked.name)
+    } catch {
+      // no-op
+    }
+    if (priorOriginal) {
+      registry.set(priorOriginal.name, priorOriginal)
+      try {
+        registerUserMacro(priorOriginal.name)
+      } catch {
+        // Preserve the original storage entry even if host registration is currently unavailable.
+      }
+    } else if (priorTarget) {
+      registry.set(priorTarget.name, priorTarget)
+      try {
+        registerUserMacro(priorTarget.name)
+      } catch {
+        // Preserve original definition in memory/storage.
+      }
+    }
+    throw error
+  }
+
+  return `Registered {{${checked.name}}}. Nested pick/random choices are now sticky per chat instance.`
+}
+
+async function deleteMacro(userId: string, name: string): Promise<string> {
+  const definition = registry.get(name)
+  if (!definition) throw new Error(`No Macro Lab macro named “${name}” exists.`)
+  registry.delete(name)
+  spindle.unregisterMacro(name)
+  await persistRegistry()
+
+  const { activeChat } = await activeContext(userId)
+  if (activeChat?.id) {
+    const chatVariables = normalizeVariableMap(await spindle.variables.chat.list(activeChat.id))
+    for (const [key, raw] of Object.entries(chatVariables)) {
+      if (!key.startsWith(STATE_PREFIX)) continue
+      const state = parseDecision(raw)
+      if (!state || state.macroName !== name) continue
+      liveDecisionCache.delete(cacheKey(activeChat.id, key))
+      await spindle.variables.chat.delete(activeChat.id, key)
+    }
+  }
+  return `Deleted {{${name}}} and its state in the active chat.`
+}
+
+async function decisionAction(userId: string, request: DecisionActionRequest): Promise<string> {
+  if (!request.key.startsWith(STATE_PREFIX)) throw new Error('Invalid Macro Lab decision key.')
+  const activeChat = await spindle.chats.getActive(userId)
+  if (!activeChat?.id) throw new Error('Open a chat first; rerollable state is stored per chat.')
+  const raw = await spindle.variables.chat.get(activeChat.id, request.key)
+  const state = parseDecision(raw)
+  if (!state) throw new Error('That decision no longer exists.')
+
+  if (request.action === 'toggle_lock') {
+    const next = { ...state, locked: !state.locked, updatedAt: nowIso() }
+    await spindle.variables.chat.set(activeChat.id, request.key, serializeDecision(next))
+    liveDecisionCache.set(cacheKey(activeChat.id, request.key), next)
+    return `${next.locked ? 'Locked' : 'Unlocked'} ${state.macroName}/${state.instance}/${state.decisionId}.`
+  }
+
+  if (state.locked) throw new Error('That decision is locked. Unlock it before rerolling or resetting it.')
+
+  if (request.action === 'reset') {
+    await spindle.variables.chat.delete(activeChat.id, request.key)
+    liveDecisionCache.delete(cacheKey(activeChat.id, request.key))
+    return `Reset ${state.macroName}/${state.instance}/${state.decisionId}; it will roll again next time it resolves.`
+  }
+
+  let next: DecisionState
+  if (state.kind === 'pick') {
+    const options = state.options ?? []
+    if (!options.length) throw new Error('This pick has no saved option snapshot yet. Resolve it once, then reroll.')
+    const index = differentRandomIndex(options.length, state.choiceIndex)
+    next = {
+      ...state,
+      choiceIndex: index,
+      optionCount: options.length,
+      value: options[index] ?? '',
+      updatedAt: nowIso(),
+    }
+  } else {
+    const randomArgs = state.args ?? []
+    const value = await rerollNativeRandom(randomArgs, state.value, {
+      chatId: activeChat.id,
+      characterId: activeChat.character_id || undefined,
       userId,
-    )
+    })
+    next = { ...state, value, updatedAt: nowIso() }
+  }
+
+  await spindle.variables.chat.set(activeChat.id, request.key, serializeDecision(next))
+  liveDecisionCache.set(cacheKey(activeChat.id, request.key), next)
+  return `Rerolled ${state.macroName}/${state.instance}/${state.decisionId}: ${state.value || '∅'} → ${next.value || '∅'}`
+}
+
+async function instanceAction(userId: string, request: InstanceActionRequest): Promise<string> {
+  const activeChat = await spindle.chats.getActive(userId)
+  if (!activeChat?.id) throw new Error('Open a chat first; rerollable state is stored per chat.')
+  const chatVariables = normalizeVariableMap(await spindle.variables.chat.list(activeChat.id))
+  let changed = 0
+  let locked = 0
+
+  for (const [key, raw] of Object.entries(chatVariables)) {
+    if (!key.startsWith(STATE_PREFIX)) continue
+    const state = parseDecision(raw)
+    if (!state || state.macroName !== request.macroName || state.instance !== request.instance) continue
+    if (state.locked) {
+      locked += 1
+      continue
+    }
+
+    if (request.action === 'reset') {
+      await spindle.variables.chat.delete(activeChat.id, key)
+      liveDecisionCache.delete(cacheKey(activeChat.id, key))
+      changed += 1
+      continue
+    }
+
+    let next: DecisionState | null = null
+    if (state.kind === 'pick') {
+      const options = state.options ?? []
+      if (options.length) {
+        const index = differentRandomIndex(options.length, state.choiceIndex)
+        next = { ...state, choiceIndex: index, value: options[index] ?? '', updatedAt: nowIso() }
+      }
+    } else {
+      const value = await rerollNativeRandom(state.args ?? [], state.value, {
+        chatId: activeChat.id,
+        characterId: activeChat.character_id || undefined,
+        userId,
+      })
+      next = { ...state, value, updatedAt: nowIso() }
+    }
+
+    if (next) {
+      await spindle.variables.chat.set(activeChat.id, key, serializeDecision(next))
+      liveDecisionCache.set(cacheKey(activeChat.id, key), next)
+      changed += 1
+    }
+  }
+
+  const verb = request.action === 'reroll' ? 'Rerolled' : 'Reset'
+  const suffix = locked ? ` ${locked} locked decision${locked === 1 ? '' : 's'} were left alone.` : ''
+  return `${verb} ${changed} decision${changed === 1 ? '' : 's'} in ${request.macroName}/${request.instance}.${suffix}`
+}
+
+async function variableAction(userId: string, request: VariableActionRequest): Promise<string> {
+  const key = String(request.key ?? '').trim()
+  if (!key) throw new Error('Variable name is required.')
+  if (key.startsWith(STATE_PREFIX)) throw new Error('Macro Lab decision variables are managed from the Decisions section.')
+
+  const activeChat = request.scope === 'global' ? null : await spindle.chats.getActive(userId)
+  if (request.scope !== 'global' && !activeChat?.id) throw new Error('Open a chat first to edit chat/local variables.')
+
+  const target = spindle.variables[request.scope]
+  if (request.action === 'delete') {
+    if (request.scope === 'global') await target.delete(key)
+    else await target.delete(activeChat.id, key)
+    return `Deleted ${request.scope} variable ${key}.`
+  }
+
+  const value = String(request.value ?? '')
+  if (request.scope === 'global') await target.set(key, value)
+  else await target.set(activeChat.id, key, value)
+  return `Updated ${request.scope} variable ${key}.`
+}
+
+spindle.onFrontendMessage(async (payload: unknown, userId: string) => {
+  if (!isFrontendRequest(payload)) return
+  const request = payload as FrontendRequest
+
+  try {
+    await ready
+
+    if (request.type === 'lumi_macro_lab:resolve') {
+      if (request.template.length > MAX_TEMPLATE_LENGTH) {
+        throw new Error(
+          `Input is too large (${request.template.length.toLocaleString()} characters). The preview limit is ${MAX_TEMPLATE_LENGTH.toLocaleString()} characters.`,
+        )
+      }
+
+      const { activeChat, variables } = await activeContext(userId)
+      const options: { chatId?: string; characterId?: string; userId: string; commit: false } = {
+        userId,
+        commit: false,
+      }
+      if (activeChat?.id) options.chatId = activeChat.id
+      if (activeChat?.character_id) options.characterId = activeChat.character_id
+
+      const result = await spindle.macros.resolve(request.template, options)
+      const diagnostics: MacroDiagnostic[] = Array.isArray(result?.diagnostics) ? result.diagnostics : []
+      spindle.sendToFrontend(
+        {
+          type: 'lumi_macro_lab:result',
+          requestId: request.requestId,
+          text: typeof result?.text === 'string' ? result.text : '',
+          diagnostics,
+          context: activeChat
+            ? {
+                name: typeof activeChat.name === 'string' && activeChat.name.trim() ? activeChat.name : 'Active chat',
+                hasCharacter: Boolean(activeChat.character_id),
+                variables,
+              }
+            : null,
+        },
+        userId,
+      )
+      return
+    }
+
+    if (request.type === 'lumi_macro_lab:get_state') {
+      await sendState(userId, request.requestId)
+      return
+    }
+
+    if (request.type === 'lumi_macro_lab:save_macro') {
+      const notice = await saveMacro(request)
+      await sendState(userId, request.requestId, notice)
+      return
+    }
+
+    if (request.type === 'lumi_macro_lab:delete_macro') {
+      const notice = await deleteMacro(userId, String(request.name ?? '').trim())
+      await sendState(userId, request.requestId, notice)
+      return
+    }
+
+    if (request.type === 'lumi_macro_lab:decision_action') {
+      const notice = await decisionAction(userId, request)
+      await sendState(userId, request.requestId, notice)
+      return
+    }
+
+    if (request.type === 'lumi_macro_lab:instance_action') {
+      const notice = await instanceAction(userId, request)
+      await sendState(userId, request.requestId, notice)
+      return
+    }
+
+    if (request.type === 'lumi_macro_lab:variable_action') {
+      const notice = await variableAction(userId, request)
+      await sendState(userId, request.requestId, notice)
+    }
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error)
-
     spindle.sendToFrontend(
       {
         type: 'lumi_macro_lab:error',
-        requestId,
+        requestId: request.requestId,
         error: message,
       },
       userId,
     )
   }
 })
-
-spindle.log.info('Lumi Macro Lab loaded')

@@ -1,12 +1,14 @@
 {
   "name": "lumi-macro-lab",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
-  "description": "Ephemeral macro resolution preview for Lumiverse.",
+  "description": "Macro resolution inspector and rerollable named macros for Lumiverse.",
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "check": "tsc -p tsconfig.json --noEmit"
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "node tests/harness.mjs",
+    "verify": "npm run check && npm run build && npm test"
   },
   "devDependencies": {
     "typescript": "^5.8.3"
