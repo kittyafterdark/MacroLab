@@ -57,7 +57,7 @@ From **Macros & State** you can:
 - reset a decision so it rolls again on the next committed resolve;
 - reroll/reset an entire macro instance while leaving locked decisions alone.
 
-The state value lives in native Lumi chat-variable storage so it follows the chat across generations, regens, swipes, and edits. Macro definitions themselves live in the extension's private Spindle storage.
+The state value lives in native Lumi chat-variable storage so it follows the chat across generations, regens, swipes, and edits. Macro definitions themselves live in per-user `spindle.userStorage`, so operator/global installs keep each user's registered macro bodies isolated. A shared extension-level index stores only registered macro names so those handlers can be restored after a server restart.
 
 ## Native variables
 
@@ -100,7 +100,7 @@ macro name + instance + stochastic node id
 
 So nested registered macros naturally get their own state namespace.
 
-## Current v1.1 behavior / sharp edges
+## Current v1.1.x behavior / sharp edges
 
 This is intentionally a small first implementation of a rather demented idea:
 
@@ -113,7 +113,7 @@ This is intentionally a small first implementation of a rather demented idea:
 
 Install the repository URL from Lumiverse's Extensions panel, or upload an archive containing `spindle.json` at its root.
 
-The compiled files in `dist/` are included, so users do not need TypeScript installed.
+The compiled files in `dist/` are included, so users do not need TypeScript installed. The same archive supports both user-scoped and operator/global installs; operator-sensitive calls are explicitly scoped to the requesting `userId`.
 
 ## Development
 

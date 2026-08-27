@@ -1,5 +1,7 @@
 "use strict";
 const REGISTRY_PATH = 'macro-registry.json';
+const REGISTRY_NAME_INDEX_PATH = 'macro-name-index.json';
+const OWNER_REGISTRY_KEY = '__owner__';
 const STATE_PREFIX = '__lml_state__';
 const INTERNAL_PICK = 'lmlDecisionPick';
 const INTERNAL_RANDOM = 'lmlDecisionRandom';
@@ -9,7 +11,12 @@ const MAX_MACRO_NAME_LENGTH = 64;
 const MAX_INSTANCE_LENGTH = 256;
 const MAX_DESCRIPTION_LENGTH = 500;
 const MACRO_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]*$/;
-const registry = new Map();
+const registries = new Map();
+const loadedRegistryUsers = new Set();
+const registeredUserMacroNames = new Set();
+const persistedMacroNames = new Set();
+let legacyRegistry = [];
+let legacyMigrationClaimed = false;
 const liveDecisionCache = new Map();
 function nowIso() {
     return new Date().toISOString();
@@ -350,64 +357,183 @@ function registerInternalMacros() {
         },
     });
 }
+function registryKey(userId) {
+    return userId || OWNER_REGISTRY_KEY;
+}
+function registryForKey(key) {
+    let registry = registries.get(key);
+    if (!registry) {
+        registry = new Map();
+        registries.set(key, registry);
+    }
+    return registry;
+}
+function registryForUser(userId) {
+    return registryForKey(registryKey(userId));
+}
+function resolveRegistryKeyFromContext(ctx) {
+    const explicitUserId = contextIds(ctx).userId;
+    if (explicitUserId)
+        return registryKey(explicitUserId);
+    if (registries.has(OWNER_REGISTRY_KEY))
+        return OWNER_REGISTRY_KEY;
+    if (registries.size === 1)
+        return registries.keys().next().value ?? null;
+    return null;
+}
 function registerUserMacro(name) {
+    if (registeredUserMacroNames.has(name))
+        return;
     spindle.registerMacro({
         name,
         category: 'extension:lumi_macro_lab',
-        description: registry.get(name)?.description || `Registered in Lumi Macro Lab. Use {{${name}}} or {{${name}::instance}}.`,
+        description: `Registered in Lumi Macro Lab. Use {{${name}}} or {{${name}::instance}}.`,
         returnType: 'string',
         volatile: true,
-        handler: (ctx) => {
-            const definition = registry.get(name);
+        handler: async (ctx) => {
+            const explicitUserId = contextIds(ctx).userId;
+            if (explicitUserId)
+                await ensureRegistryLoaded(explicitUserId);
+            const key = resolveRegistryKeyFromContext(ctx);
+            if (!key)
+                return '';
+            const definition = registryForKey(key).get(name);
             if (!definition)
                 return '';
             const instance = normalizeInstance(ctx?.args);
             return instrumentBody(definition.body, name, instance);
         },
     });
+    registeredUserMacroNames.add(name);
 }
-async function persistRegistry() {
+async function persistNameIndex() {
+    await spindle.storage.setJson(REGISTRY_NAME_INDEX_PATH, { version: 1, names: [...persistedMacroNames].sort((a, b) => a.localeCompare(b)) }, { indent: 2 });
+}
+async function addMacroNameToIndex(name) {
+    if (persistedMacroNames.has(name))
+        return;
+    persistedMacroNames.add(name);
+    await persistNameIndex();
+}
+async function persistRegistry(userId) {
+    const registry = registryForUser(userId);
     const payload = {
         version: 1,
         macros: [...registry.values()].sort((a, b) => a.name.localeCompare(b.name)),
     };
-    await spindle.storage.setJson(REGISTRY_PATH, payload, { indent: 2 });
-}
-async function loadRegistry() {
-    const stored = await spindle.storage.getJson(REGISTRY_PATH, {
-        fallback: { version: 1, macros: [] },
+    await spindle.userStorage.setJson(REGISTRY_PATH, payload, {
+        indent: 2,
+        ...(userId ? { userId } : {}),
     });
+}
+function normalizeStoredRegistry(stored) {
+    const normalized = [];
     const macros = Array.isArray(stored?.macros) ? stored.macros : [];
     for (const raw of macros) {
         try {
             const checked = validateMacroDefinition(raw);
             const createdAt = typeof raw?.createdAt === 'string' ? raw.createdAt : nowIso();
             const updatedAt = typeof raw?.updatedAt === 'string' ? raw.updatedAt : createdAt;
-            const definition = { ...checked, createdAt, updatedAt };
-            registry.set(definition.name, definition);
-            try {
-                registerUserMacro(definition.name);
-            }
-            catch (error) {
-                registry.delete(definition.name);
-                spindle.log.warn(`Could not register stored macro ${definition.name}: ${error instanceof Error ? error.message : String(error)}`);
-            }
+            normalized.push({ ...checked, createdAt, updatedAt });
         }
         catch (error) {
             spindle.log.warn(`Skipped invalid stored macro: ${error instanceof Error ? error.message : String(error)}`);
         }
     }
+    return normalized;
+}
+async function ensureRegistryLoaded(userId) {
+    const key = registryKey(userId);
+    if (loadedRegistryUsers.has(key))
+        return;
+    const stored = await spindle.userStorage.getJson(REGISTRY_PATH, {
+        fallback: { version: 1, macros: [] },
+        ...(userId ? { userId } : {}),
+    });
+    let definitions = normalizeStoredRegistry(stored);
+    // 1.1.0 stored definitions in extension-wide storage. Claim that legacy file once
+    // and migrate it into the first real user's isolated storage. This avoids both
+    // losing a tester's macros and copying private definitions to every operator user.
+    if (!definitions.length && legacyRegistry.length && !legacyMigrationClaimed) {
+        legacyMigrationClaimed = true;
+        definitions = legacyRegistry.map((definition) => ({ ...definition }));
+    }
+    const registry = registryForKey(key);
+    registry.clear();
+    for (const definition of definitions) {
+        registry.set(definition.name, definition);
+        await addMacroNameToIndex(definition.name);
+        try {
+            registerUserMacro(definition.name);
+        }
+        catch (error) {
+            registry.delete(definition.name);
+            spindle.log.warn(`Could not register stored macro ${definition.name}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+    loadedRegistryUsers.add(key);
+    if (legacyMigrationClaimed && legacyRegistry.length && definitions.length) {
+        await persistRegistry(userId);
+        legacyRegistry = [];
+        await spindle.storage.setJson(REGISTRY_PATH, { version: 1, macros: [] }, { indent: 2 });
+    }
+}
+async function loadRegistryBootstrap() {
+    const [nameIndex, legacy] = await Promise.all([
+        spindle.storage.getJson(REGISTRY_NAME_INDEX_PATH, { fallback: { version: 1, names: [] } }),
+        spindle.storage.getJson(REGISTRY_PATH, { fallback: { version: 1, macros: [] } }),
+    ]);
+    const names = Array.isArray(nameIndex?.names) ? nameIndex.names : [];
+    for (const rawName of names) {
+        const name = String(rawName ?? '').trim();
+        if (MACRO_NAME_RE.test(name) && name !== INTERNAL_PICK && name !== INTERNAL_RANDOM)
+            persistedMacroNames.add(name);
+    }
+    legacyRegistry = normalizeStoredRegistry(legacy);
+    for (const definition of legacyRegistry)
+        persistedMacroNames.add(definition.name);
+    if (legacyRegistry.length)
+        await persistNameIndex();
+    for (const name of persistedMacroNames) {
+        try {
+            registerUserMacro(name);
+        }
+        catch (error) {
+            spindle.log.warn(`Could not register indexed macro ${name}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+    // User-scoped installs can infer their owner at startup. Operator-scoped installs
+    // intentionally throw here; their per-user registry is loaded lazily from the
+    // userId supplied by frontend messages or macro invocation context.
+    try {
+        await ensureRegistryLoaded('');
+    }
+    catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/userId.*required.*operator-scoped/i.test(message)) {
+            spindle.log.warn(`Could not preload owner registry: ${message}`);
+        }
+    }
 }
 async function initialize() {
     registerInternalMacros();
-    await loadRegistry();
-    spindle.log.info(`Lumi Macro Lab loaded (${registry.size} registered macro${registry.size === 1 ? '' : 's'})`);
+    await loadRegistryBootstrap();
+    spindle.log.info(`Lumi Macro Lab loaded (${registeredUserMacroNames.size} registered macro name${registeredUserMacroNames.size === 1 ? '' : 's'})`);
 }
 const ready = initialize();
+async function globalVariablesList(userId) {
+    return spindle.variables.global.list(userId);
+}
+async function globalVariableSet(userId, key, value) {
+    await spindle.variables.global.set(key, value, userId);
+}
+async function globalVariableDelete(userId, key) {
+    await spindle.variables.global.delete(key, userId);
+}
 async function activeContext(userId) {
     const activeChat = await spindle.chats.getActive(userId);
     const [globalVariables, chatVariables, localVariables] = await Promise.all([
-        spindle.variables.global.list(),
+        globalVariablesList(userId),
         activeChat?.id ? spindle.variables.chat.list(activeChat.id) : Promise.resolve({}),
         activeChat?.id ? spindle.variables.local.list(activeChat.id) : Promise.resolve({}),
     ]);
@@ -443,6 +569,8 @@ async function activeContext(userId) {
     };
 }
 async function sendState(userId, requestId, notice) {
+    await ensureRegistryLoaded(userId);
+    const registry = registryForUser(userId);
     const { activeChat, variables, decisions } = await activeContext(userId);
     spindle.sendToFrontend({
         type: 'lumi_macro_lab:state',
@@ -460,7 +588,9 @@ async function sendState(userId, requestId, notice) {
             : null,
     }, userId);
 }
-async function saveMacro(request) {
+async function saveMacro(userId, request) {
+    await ensureRegistryLoaded(userId);
+    const registry = registryForUser(userId);
     const checked = validateMacroDefinition(request.definition);
     const originalName = String(request.originalName ?? '').trim();
     const priorOriginal = originalName ? registry.get(originalName) : undefined;
@@ -468,60 +598,43 @@ async function saveMacro(request) {
     if (priorTarget && originalName && originalName !== checked.name) {
         throw new Error(`A Macro Lab macro named “${checked.name}” already exists.`);
     }
+    // Register the host-level name before mutating storage so a collision with a
+    // native/other-extension macro fails cleanly without corrupting the user's registry.
+    registerUserMacro(checked.name);
     const timestamp = nowIso();
     const next = {
         ...checked,
         createdAt: priorOriginal?.createdAt ?? priorTarget?.createdAt ?? timestamp,
         updatedAt: timestamp,
     };
-    if (originalName && originalName !== checked.name && priorOriginal) {
-        spindle.unregisterMacro(originalName);
+    if (originalName && originalName !== checked.name)
         registry.delete(originalName);
-    }
-    if (registry.has(checked.name))
-        spindle.unregisterMacro(checked.name);
     registry.set(checked.name, next);
     try {
-        registerUserMacro(checked.name);
-        await persistRegistry();
+        await persistRegistry(userId);
+        await addMacroNameToIndex(checked.name);
     }
     catch (error) {
         registry.delete(checked.name);
-        try {
-            spindle.unregisterMacro(checked.name);
-        }
-        catch {
-            // no-op
-        }
-        if (priorOriginal) {
+        if (priorOriginal)
             registry.set(priorOriginal.name, priorOriginal);
-            try {
-                registerUserMacro(priorOriginal.name);
-            }
-            catch {
-                // Preserve the original storage entry even if host registration is currently unavailable.
-            }
-        }
-        else if (priorTarget) {
+        else if (priorTarget)
             registry.set(priorTarget.name, priorTarget);
-            try {
-                registerUserMacro(priorTarget.name);
-            }
-            catch {
-                // Preserve original definition in memory/storage.
-            }
-        }
         throw error;
     }
     return `Registered {{${checked.name}}}. Nested pick/random choices are now sticky per chat instance.`;
 }
 async function deleteMacro(userId, name) {
+    await ensureRegistryLoaded(userId);
+    const registry = registryForUser(userId);
     const definition = registry.get(name);
     if (!definition)
         throw new Error(`No Macro Lab macro named “${name}” exists.`);
     registry.delete(name);
-    spindle.unregisterMacro(name);
-    await persistRegistry();
+    await persistRegistry(userId);
+    // Keep the host-level name registered. In an operator install another user may
+    // still own a definition with the same name; its handler simply returns empty
+    // for users whose isolated registry does not contain that macro.
     const { activeChat } = await activeContext(userId);
     if (activeChat?.id) {
         const chatVariables = normalizeVariableMap(await spindle.variables.chat.list(activeChat.id));
@@ -648,14 +761,14 @@ async function variableAction(userId, request) {
     const target = spindle.variables[request.scope];
     if (request.action === 'delete') {
         if (request.scope === 'global')
-            await target.delete(key);
+            await globalVariableDelete(userId, key);
         else
             await target.delete(activeChat.id, key);
         return `Deleted ${request.scope} variable ${key}.`;
     }
     const value = String(request.value ?? '');
     if (request.scope === 'global')
-        await target.set(key, value);
+        await globalVariableSet(userId, key, value);
     else
         await target.set(activeChat.id, key, value);
     return `Updated ${request.scope} variable ${key}.`;
@@ -666,6 +779,7 @@ spindle.onFrontendMessage(async (payload, userId) => {
     const request = payload;
     try {
         await ready;
+        await ensureRegistryLoaded(userId);
         if (request.type === 'lumi_macro_lab:resolve') {
             if (request.template.length > MAX_TEMPLATE_LENGTH) {
                 throw new Error(`Input is too large (${request.template.length.toLocaleString()} characters). The preview limit is ${MAX_TEMPLATE_LENGTH.toLocaleString()} characters.`);
@@ -701,7 +815,7 @@ spindle.onFrontendMessage(async (payload, userId) => {
             return;
         }
         if (request.type === 'lumi_macro_lab:save_macro') {
-            const notice = await saveMacro(request);
+            const notice = await saveMacro(userId, request);
             await sendState(userId, request.requestId, notice);
             return;
         }

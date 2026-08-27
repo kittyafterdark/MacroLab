@@ -11,8 +11,10 @@ const macroHandlers = new Map()
 const frontendMessages = []
 const chatVars = new Map()
 const localVars = new Map()
-const globalVars = new Map()
+const globalVarsByUser = new Map([['user-1', new Map()], ['user-2', new Map()]])
+const globalVars = globalVarsByUser.get('user-1')
 const storageFiles = new Map()
+const userStorageFiles = new Map()
 let frontendHandler = null
 let rng = 0
 const randomValues = [0.02, 0.66, 0.31, 0.92, 0.47, 0.78, 0.15, 0.58]
@@ -44,6 +46,29 @@ function variableApi(scope) {
   }
 }
 
+function requireOperatorUserId(userId) {
+  if (!userId) throw new Error('userId is required for operator-scoped extensions')
+  return String(userId)
+}
+
+function globalsFor(userId) {
+  const id = requireOperatorUserId(userId)
+  let store = globalVarsByUser.get(id)
+  if (!store) {
+    store = new Map()
+    globalVarsByUser.set(id, store)
+  }
+  return store
+}
+
+const globalVariableApi = {
+  async list(userId) { return Object.fromEntries(globalsFor(userId)) },
+  async get(key, userId) { return String(globalsFor(userId).get(String(key)) ?? '') },
+  async set(key, value, userId) { globalsFor(userId).set(String(key), String(value ?? '')) },
+  async delete(key, userId) { globalsFor(userId).delete(String(key)) },
+  async has(key, userId) { return globalsFor(userId).has(String(key)) },
+}
+
 function splitArgs(source) {
   return source.split('::')
 }
@@ -58,7 +83,7 @@ async function resolveTemplate(template, options = {}) {
     variables: {
       chat: envChat,
       local: new Map(localVars),
-      global: new Map(globalVars),
+      global: new Map(globalsFor(options.userId)),
     },
   }
 
@@ -128,10 +153,20 @@ const spindle = {
     async setJson(key, value) { storageFiles.set(key, structuredClone(value)) },
     async getJson(key, options = {}) { return structuredClone(storageFiles.get(key) ?? options.fallback) },
   },
+  userStorage: {
+    async setJson(key, value, options = {}) {
+      const userId = requireOperatorUserId(options.userId)
+      userStorageFiles.set(`${userId}:${key}`, structuredClone(value))
+    },
+    async getJson(key, options = {}) {
+      const userId = requireOperatorUserId(options.userId)
+      return structuredClone(userStorageFiles.get(`${userId}:${key}`) ?? options.fallback)
+    },
+  },
   variables: {
     chat: variableApi('chat'),
     local: variableApi('local'),
-    global: variableApi('global'),
+    global: globalVariableApi,
   },
   chats: {
     async getActive(_userId) { return activeChat },
@@ -177,12 +212,15 @@ assert.equal(typeof frontendHandler, 'function', 'backend should register a fron
 assert(macroHandlers.has('lmlDecisionPick'), 'internal sticky pick macro should register')
 assert(macroHandlers.has('lmlDecisionRandom'), 'internal sticky random macro should register')
 
-async function request(payload) {
+async function requestAs(userId, payload) {
   frontendMessages.length = 0
-  await frontendHandler({ ...payload, requestId: payload.requestId ?? `req-${Date.now()}-${rng}` }, 'user-1')
+  await frontendHandler({ ...payload, requestId: payload.requestId ?? `req-${Date.now()}-${rng}` }, userId)
   assert(frontendMessages.length > 0, `request ${payload.type} should answer`)
+  assert.equal(frontendMessages.at(-1).userId, userId, 'operator responses must target the originating user')
   return frontendMessages.at(-1).payload
 }
+
+const request = (payload) => requestAs('user-1', payload)
 
 function decisionVars() {
   return [...chatVars.entries()].filter(([key]) => key.startsWith('__lml_state__'))
@@ -281,9 +319,37 @@ response = await request({
   definition: { name: 'persona', description: '', body: 'Secret: {{secret::alice}} / Mood: {{pick::calm::restless}}' },
 })
 assert.equal(response.type, 'lumi_macro_lab:state')
-assert(!macroHandlers.has('profile'))
+assert(macroHandlers.has('profile'), 'host registration stays alive because another operator user may own the old name')
 assert(macroHandlers.has('persona'))
-assert(storageFiles.get('macro-registry.json').macros.some((macro) => macro.name === 'persona'))
+assert(userStorageFiles.get('user-1:macro-registry.json').macros.some((macro) => macro.name === 'persona'))
+assert(storageFiles.get('macro-name-index.json').names.includes('persona'))
+
+// Operator-scoped installs isolate definitions and global vars per user while sharing host macro names.
+response = await requestAs('user-2', { type: 'lumi_macro_lab:get_state' })
+assert.equal(response.type, 'lumi_macro_lab:state')
+assert.equal(response.macros.length, 0, 'a second operator user must not see user-1 macro bodies')
+
+response = await requestAs('user-2', {
+  type: 'lumi_macro_lab:save_macro',
+  definition: { name: 'backstory', description: 'User two version', body: 'USER_TWO {{pick::orchard::desert}}' },
+})
+assert.equal(response.type, 'lumi_macro_lab:state')
+assert.equal(response.macros.length, 1)
+const userTwoBackstory = await resolveTemplate('{{backstory::alice}}', { chatId: activeChat.id, characterId: activeChat.character_id, userId: 'user-2', commit: false })
+assert.match(userTwoBackstory.text, /^USER_TWO /)
+const userOneBackstory = await resolveTemplate('{{backstory::alice}}', { chatId: activeChat.id, characterId: activeChat.character_id, userId: 'user-1', commit: false })
+assert(!userOneBackstory.text.startsWith('USER_TWO '), 'same registered name should dispatch to the invoking user registry')
+
+response = await request({ type: 'lumi_macro_lab:variable_action', scope: 'global', action: 'set', key: 'accent', value: 'pink' })
+assert.equal(response.type, 'lumi_macro_lab:state')
+response = await requestAs('user-2', { type: 'lumi_macro_lab:variable_action', scope: 'global', action: 'set', key: 'accent', value: 'green' })
+assert.equal(response.type, 'lumi_macro_lab:state')
+assert.equal(globalsFor('user-1').get('accent'), 'pink')
+assert.equal(globalsFor('user-2').get('accent'), 'green')
+response = await request({ type: 'lumi_macro_lab:get_state' })
+assert.equal(response.variables.global.accent, 'pink')
+response = await requestAs('user-2', { type: 'lumi_macro_lab:get_state' })
+assert.equal(response.variables.global.accent, 'green')
 
 // Directly verify that persisted decision state is URI-safe JSON and includes recipe metadata.
 for (const [, raw] of decisionVars()) {

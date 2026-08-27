@@ -1,12 +1,14 @@
 {
-  "version": "1.1.0",
+  "version": "1.1.1",
   "name": "Lumi Macro Lab",
   "identifier": "lumi_macro_lab",
   "author": "kittyafterdark",
   "github": "https://github.com/kittyafterdark/LumiMacroLab",
   "homepage": "https://github.com/kittyafterdark/LumiMacroLab",
   "description": "Inspect macro resolution, register reusable macros, and reroll sticky nested random decisions.",
-  "permissions": ["chats"],
+  "permissions": [
+    "chats"
+  ],
   "entry_backend": "dist/backend.js",
   "entry_frontend": "dist/frontend.js"
 }
