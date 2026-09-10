@@ -1,15 +1,15 @@
 {
   "name": "macrolab",
-  "version": "2.0.0-alpha.1",
+  "version": "2.0.0-alpha.2",
   "private": true,
   "type": "module",
   "description": "Dynamic macro authoring, contextual inspection, and chat-scoped sticky state for Lumiverse.",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node scripts/bundle.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "node tests/harness.mjs",
-    "verify": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.json && node tests/harness.mjs",
-    "package": "tsc -p tsconfig.json && node scripts/package.mjs"
+    "verify": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.json && node scripts/bundle.mjs && node tests/harness.mjs",
+    "package": "tsc -p tsconfig.json && node scripts/bundle.mjs && node scripts/package.mjs"
   },
   "devDependencies": {
     "typescript": "^5.8.3"

@@ -129,6 +129,8 @@ bun run verify
 
 The scripts are runtime-neutral enough to work through npm as well; Bun is the expected workflow for the forge.
 
+Builds intentionally emit self-contained `dist/frontend.js` and `dist/backend.js` entry files. Spindle may load an extension entry through a blob/data-style module URL, where relative imports such as `./core/decision-graph.js` have no hierarchical base and therefore cannot resolve. The modular TypeScript source remains under `src/`; the runtime entry artifacts are bundled during `bun run build`.
+
 The harness models `ctx.env` as an immutable structured-clone snapshot and rejects mutating variable calls made from a `commit:false` macro invocation. That is intentional: a test must not accidentally recreate the permissive fake environment that hid the v1 architecture bug.
 
 ## Icons
@@ -144,6 +146,6 @@ The harness models `ctx.env` as an immutable structured-clone snapshot and rejec
 
 ## Status
 
-`2.0.0-alpha.1` is a forge build. The state engine, Hot Plate, Pipette, full MacroLab drawer, definition migration, and regression harness are present. Message-level provenance, source-aware lorebook names, richer host workspaces, and regenerate-after-reroll are intentionally left for subsequent welds rather than guessed into the first rewrite.
+`2.0.0-alpha.2` is a forge build. The state engine, Hot Plate, Pipette, full MacroLab drawer, definition migration, and regression harness are present. Message-level provenance, source-aware lorebook names, richer host workspaces, and regenerate-after-reroll are intentionally left for subsequent welds rather than guessed into the first rewrite.
 
 MacroLab is an independent, unofficial extension designed to interoperate with Lumiverse. It is not affiliated with, endorsed by, or supported by the Lumiverse project.
