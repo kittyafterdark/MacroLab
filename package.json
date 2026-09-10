@@ -1,14 +1,15 @@
 {
-  "name": "lumi-macro-lab",
-  "version": "1.1.1",
+  "name": "macrolab",
+  "version": "2.0.0-alpha.1",
   "private": true,
   "type": "module",
-  "description": "Macro resolution inspector and rerollable named macros for Lumiverse.",
+  "description": "Dynamic macro authoring, contextual inspection, and chat-scoped sticky state for Lumiverse.",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "node tests/harness.mjs",
-    "verify": "npm run check && npm run build && npm test"
+    "verify": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.json && node tests/harness.mjs",
+    "package": "tsc -p tsconfig.json && node scripts/package.mjs"
   },
   "devDependencies": {
     "typescript": "^5.8.3"

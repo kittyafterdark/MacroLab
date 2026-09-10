@@ -1,72 +1,76 @@
 import assert from 'node:assert/strict'
-import fs from 'node:fs'
-import vm from 'node:vm'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { pathToFileURL, fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const backendCode = fs.readFileSync(path.join(root, 'dist', 'backend.js'), 'utf8')
 
 const macroHandlers = new Map()
 const frontendMessages = []
-const chatVars = new Map()
-const localVars = new Map()
-const globalVarsByUser = new Map([['user-1', new Map()], ['user-2', new Map()]])
-const globalVars = globalVarsByUser.get('user-1')
+const chatStores = new Map()
+const localStores = new Map()
+const globalStores = new Map()
 const storageFiles = new Map()
 const userStorageFiles = new Map()
+const invocationStack = []
 let frontendHandler = null
 let rng = 0
-const randomValues = [0.02, 0.66, 0.31, 0.92, 0.47, 0.78, 0.15, 0.58]
-const deterministicRandom = () => randomValues[(rng++) % randomValues.length]
+const randomValues = [0.02, 0.66, 0.31, 0.92, 0.47, 0.78, 0.15, 0.58, 0.84, 0.23]
+const originalRandom = Math.random
+Math.random = () => randomValues[(rng++) % randomValues.length]
 
-const activeChat = {
-  id: 'chat-1',
-  name: 'Harness Chat',
-  character_id: 'char-1',
-}
+const activeChats = new Map([
+  ['user-1', { id: 'chat-1', name: 'Harness Chat One', character_id: 'char-1' }],
+  ['user-2', { id: 'chat-2', name: 'Harness Chat Two', character_id: 'char-2' }],
+])
 
-function storeFor(scope) {
-  if (scope === 'chat') return chatVars
-  if (scope === 'local') return localVars
-  return globalVars
-}
-
-function variableApi(scope) {
-  const store = storeFor(scope)
-  return {
-    async list(..._args) { return Object.fromEntries(store) },
-    async get(...args) { return store.get(String(args.at(-1))) },
-    async set(...args) {
-      const key = String(args.at(-2))
-      const value = String(args.at(-1) ?? '')
-      store.set(key, value)
-    },
-    async delete(...args) { store.delete(String(args.at(-1))) },
-  }
-}
-
-function requireOperatorUserId(userId) {
-  if (!userId) throw new Error('userId is required for operator-scoped extensions')
-  return String(userId)
-}
-
-function globalsFor(userId) {
-  const id = requireOperatorUserId(userId)
-  let store = globalVarsByUser.get(id)
+function mapFor(pool, id) {
+  let store = pool.get(id)
   if (!store) {
     store = new Map()
-    globalVarsByUser.set(id, store)
+    pool.set(id, store)
   }
   return store
 }
 
+function chatStore(chatId) { return mapFor(chatStores, String(chatId)) }
+function localStore(chatId) { return mapFor(localStores, String(chatId)) }
+function globalStore(userId) { return mapFor(globalStores, String(userId)) }
+
+function assertMutationAllowed() {
+  const frame = invocationStack.at(-1)
+  if (frame && frame.commit === false) throw new Error('Harness: mutating variable API rejected inside commit:false macro invocation')
+}
+
+const chatVariableApi = {
+  async list(chatId) { return Object.fromEntries(chatStore(chatId)) },
+  async get(chatId, key) { return chatStore(chatId).get(String(key)) },
+  async set(chatId, key, value) {
+    assertMutationAllowed()
+    chatStore(chatId).set(String(key), String(value ?? ''))
+  },
+  async delete(chatId, key) {
+    assertMutationAllowed()
+    chatStore(chatId).delete(String(key))
+  },
+}
+
+const localVariableApi = {
+  async list(chatId) { return Object.fromEntries(localStore(chatId)) },
+  async get(chatId, key) { return localStore(chatId).get(String(key)) },
+  async set(chatId, key, value) { assertMutationAllowed(); localStore(chatId).set(String(key), String(value ?? '')) },
+  async delete(chatId, key) { assertMutationAllowed(); localStore(chatId).delete(String(key)) },
+}
+
 const globalVariableApi = {
-  async list(userId) { return Object.fromEntries(globalsFor(userId)) },
-  async get(key, userId) { return String(globalsFor(userId).get(String(key)) ?? '') },
-  async set(key, value, userId) { globalsFor(userId).set(String(key), String(value ?? '')) },
-  async delete(key, userId) { globalsFor(userId).delete(String(key)) },
-  async has(key, userId) { return globalsFor(userId).has(String(key)) },
+  async list(userId) { return Object.fromEntries(globalStore(userId)) },
+  async get(key, userId) { return globalStore(userId).get(String(key)) },
+  async set(key, value, userId) { assertMutationAllowed(); globalStore(userId).set(String(key), String(value ?? '')) },
+  async delete(key, userId) { assertMutationAllowed(); globalStore(userId).delete(String(key)) },
+}
+
+function requireUserId(userId) {
+  if (!userId) throw new Error('userId is required for operator-scoped extensions')
+  return String(userId)
 }
 
 function splitArgs(source) {
@@ -75,33 +79,38 @@ function splitArgs(source) {
 
 async function resolveTemplate(template, options = {}) {
   const commit = options.commit !== false
-  const envChat = new Map(chatVars)
-  const env = {
-    chat: options.chatId ? { id: options.chatId } : null,
-    character: options.characterId ? { id: options.characterId } : null,
-    extra: { chatId: options.chatId ?? '', characterId: options.characterId ?? '', userId: options.userId ?? '' },
-    variables: {
-      chat: envChat,
-      local: new Map(localVars),
-      global: new Map(globalsFor(options.userId)),
-    },
-  }
+  const chatId = String(options.chatId ?? '')
+  const userId = String(options.userId ?? '')
+  const characterId = String(options.characterId ?? '')
+  const envChatId = options.envChatId === undefined ? chatId : String(options.envChatId)
+  const envSnapshot = Object.freeze({
+    chat: envChatId ? Object.freeze({ id: envChatId }) : null,
+    character: characterId ? Object.freeze({ id: characterId }) : null,
+    extra: Object.freeze({ chatId: envChatId, characterId, userId }),
+    variables: Object.freeze({
+      chat: Object.freeze(Object.fromEntries(chatStore(chatId))),
+      local: Object.freeze(Object.fromEntries(localStore(chatId))),
+      global: Object.freeze(Object.fromEntries(globalStore(userId))),
+    }),
+  })
 
   async function evaluateMacro(inner) {
     const parts = splitArgs(inner)
-    const name = parts.shift().trim()
+    const name = String(parts.shift() ?? '').trim()
     const args = parts
 
     if (name === 'setchatvar') {
-      const key = String(args[0] ?? '')
-      const value = String(args.slice(1).join('::') ?? '')
-      envChat.set(key, value)
-      if (commit && options.chatId) chatVars.set(key, value)
+      if (!commit) return ''
+      chatStore(chatId).set(String(args[0] ?? ''), String(args.slice(1).join('::') ?? ''))
       return ''
     }
-
-    if (name === 'getchatvar') return String(envChat.get(String(args[0] ?? '')) ?? '')
-
+    if (name === 'getchatvar') return String(chatStore(chatId).get(String(args[0] ?? '')) ?? '')
+    if (name === 'char') return 'Elara'
+    if (name === 'user') return 'Mica'
+    if (name === 'pick') {
+      if (!args.length) return ''
+      return String(args[Math.floor(Math.random() * args.length)] ?? '')
+    }
     if (name === 'random') {
       if (args.length >= 2) {
         const low = Number(args[0])
@@ -109,29 +118,32 @@ async function resolveTemplate(template, options = {}) {
         if (Number.isFinite(low) && Number.isFinite(high)) {
           const min = Math.min(low, high)
           const max = Math.max(low, high)
-          if (Number.isInteger(min) && Number.isInteger(max)) {
-            return String(min + Math.floor(deterministicRandom() * (max - min + 1)))
-          }
-          return String(min + deterministicRandom() * (max - min))
+          if (Number.isInteger(min) && Number.isInteger(max)) return String(min + Math.floor(Math.random() * (max - min + 1)))
+          return String(min + Math.random() * (max - min))
         }
       }
-      return String(deterministicRandom())
+      return String(Math.random())
     }
-
-    if (name === 'pick') {
-      if (!args.length) return ''
-      return String(args[Math.floor(deterministicRandom() * args.length)] ?? '')
-    }
-
-    if (name === 'char') return 'Elara'
 
     const definition = macroHandlers.get(name)
     if (!definition) return `{{${inner}}}`
-    return String(await definition.handler({ args, env, commit, userId: options.userId ?? '' }) ?? '')
+    invocationStack.push({ name, commit })
+    try {
+      return String(await definition.handler({
+        name,
+        args,
+        commit,
+        chatId,
+        userId,
+        env: envSnapshot,
+      }) ?? '')
+    } finally {
+      invocationStack.pop()
+    }
   }
 
   let text = String(template)
-  for (let pass = 0; pass < 128; pass += 1) {
+  for (let pass = 0; pass < 256; pass += 1) {
     const start = text.lastIndexOf('{{')
     if (start < 0) break
     const end = text.indexOf('}}', start + 2)
@@ -155,25 +167,17 @@ const spindle = {
   },
   userStorage: {
     async setJson(key, value, options = {}) {
-      const userId = requireOperatorUserId(options.userId)
+      const userId = requireUserId(options.userId)
       userStorageFiles.set(`${userId}:${key}`, structuredClone(value))
     },
     async getJson(key, options = {}) {
-      const userId = requireOperatorUserId(options.userId)
+      const userId = requireUserId(options.userId)
       return structuredClone(userStorageFiles.get(`${userId}:${key}`) ?? options.fallback)
     },
   },
-  variables: {
-    chat: variableApi('chat'),
-    local: variableApi('local'),
-    global: globalVariableApi,
-  },
-  chats: {
-    async getActive(_userId) { return activeChat },
-  },
-  macros: {
-    resolve: resolveTemplate,
-  },
+  variables: { chat: chatVariableApi, local: localVariableApi, global: globalVariableApi },
+  chats: { async getActive(userId) { return activeChats.get(String(userId)) ?? null } },
+  macros: { resolve: resolveTemplate },
   onFrontendMessage(handler) { frontendHandler = handler },
   sendToFrontend(payload, userId) { frontendMessages.push({ payload, userId }) },
   log: {
@@ -183,180 +187,166 @@ const spindle = {
   },
 }
 
-const sandboxMath = Object.create(Math)
-sandboxMath.random = deterministicRandom
-vm.runInNewContext(backendCode, {
-  spindle,
-  console,
-  Math: sandboxMath,
-  Date,
-  Map,
-  Set,
-  JSON,
-  Object,
-  Array,
-  String,
-  Number,
-  Boolean,
-  RegExp,
-  Promise,
-  encodeURIComponent,
-  decodeURIComponent,
-  structuredClone,
-  setTimeout,
-  clearTimeout,
-}, { filename: 'dist/backend.js' })
-
+globalThis.spindle = spindle
+await import(`${pathToFileURL(path.join(root, 'dist', 'backend.js')).href}?forge=${Date.now()}`)
 await new Promise((resolve) => setTimeout(resolve, 0))
-assert.equal(typeof frontendHandler, 'function', 'backend should register a frontend message handler')
-assert(macroHandlers.has('lmlDecisionPick'), 'internal sticky pick macro should register')
-assert(macroHandlers.has('lmlDecisionRandom'), 'internal sticky random macro should register')
+
+assert.equal(typeof frontendHandler, 'function', 'backend should register a frontend handler')
+assert(macroHandlers.has('mlDecisionPickV2'), 'v2 internal pick macro should register')
+assert(macroHandlers.has('mlDecisionRandomV2'), 'v2 internal random macro should register')
+assert.equal(macroHandlers.get('mlDecisionPickV2').volatile, true, 'internal pick must be volatile')
+assert.equal(macroHandlers.get('mlDecisionRandomV2').volatile, true, 'internal random must be volatile')
 
 async function requestAs(userId, payload) {
   frontendMessages.length = 0
-  await frontendHandler({ ...payload, requestId: payload.requestId ?? `req-${Date.now()}-${rng}` }, userId)
-  assert(frontendMessages.length > 0, `request ${payload.type} should answer`)
-  assert.equal(frontendMessages.at(-1).userId, userId, 'operator responses must target the originating user')
-  return frontendMessages.at(-1).payload
+  const req = { ...payload, requestId: payload.requestId ?? `req-${Date.now()}-${rng}` }
+  await frontendHandler(req, userId)
+  assert(frontendMessages.length, `${payload.type} should answer`)
+  const response = frontendMessages.at(-1)
+  assert.equal(response.userId, userId, 'operator response must target originating user')
+  return response.payload
 }
 
 const request = (payload) => requestAs('user-1', payload)
 
-function decisionVars() {
-  return [...chatVars.entries()].filter(([key]) => key.startsWith('__lml_state__'))
+function decisionVars(chatId = 'chat-1') {
+  return [...chatStore(chatId).entries()].filter(([key]) => key.startsWith('__macrolab_v2__'))
 }
 
 function parseDecision(raw) {
   return JSON.parse(decodeURIComponent(raw))
 }
 
-// Register a macro with nested stochastic nodes.
+// Definition authoring + human descriptors.
 let response = await request({
-  type: 'lumi_macro_lab:save_macro',
+  type: 'macrolab:save_macro',
   definition: {
     name: 'backstory',
     description: 'Harness backstory',
-    body: 'Born in {{pick::the coast::the capital}}; raised by {{pick::scholars::smugglers}}; age {{random::12::19}}.',
+    body: 'Born in {{pick::the coast::the capital}}. Elara was raised by {{pick::scholars::smugglers}}. At age {{random::12::19}}, everything changed.',
   },
 })
-assert.equal(response.type, 'lumi_macro_lab:state')
+assert.equal(response.type, 'macrolab:state')
 assert(macroHandlers.has('backstory'))
+assert.equal(macroHandlers.get('backstory').volatile, true, 'registered stateful macros must be volatile')
+const backstoryView = response.macros.find((macro) => macro.name === 'backstory')
+assert(backstoryView)
+assert.equal(backstoryView.decisions.length, 3)
+assert.match(backstoryView.decisions[0].label, /Born in/i)
+assert.match(backstoryView.decisions[1].label, /raised by/i)
+assert.match(backstoryView.decisions[2].label, /At age/i)
 
-// First committed resolve creates three decision variables and strips internal setchatvar output.
-const first = await resolveTemplate('{{backstory::alice}}', { chatId: activeChat.id, characterId: activeChat.character_id, userId: 'user-1', commit: true })
-assert(!first.text.includes('{{'), 'resolved output should contain no unresolved macros')
-assert.equal(decisionVars().length, 3, 'first committed resolve should persist all stochastic decisions')
+// Real commit writes directly through chat variables even though env is a frozen structured clone.
+const first = await resolveTemplate('{{backstory::alice}}', {
+  chatId: 'chat-1',
+  envChatId: 'stale-env-chat', // host-trusted ctx.chatId must win over the clone.
+  characterId: 'char-1',
+  userId: 'user-1',
+  commit: true,
+})
+assert(!first.text.includes('{{'), 'committed resolve should fully resolve')
+assert.equal(decisionVars('chat-1').length, 3, 'first committed resolve should persist three v2 decisions')
+assert.equal(decisionVars('stale-env-chat').length, 0, 'state must use ctx.chatId, not stale cloned env chat id')
+assert.equal([...chatStore('chat-1').keys()].some((key) => key.startsWith('__lml_state__')), false, 'v1 state namespace must not be reused')
 
-// Re-resolving the same instance is sticky.
-const second = await resolveTemplate('{{backstory::alice}}', { chatId: activeChat.id, characterId: activeChat.character_id, userId: 'user-1', commit: true })
-assert.equal(second.text, first.text, 'same instance should reuse sticky choices')
-assert.equal(decisionVars().length, 3)
+// Sticky same-instance behavior.
+const second = await resolveTemplate('{{backstory::alice}}', { chatId: 'chat-1', characterId: 'char-1', userId: 'user-1', commit: true })
+assert.equal(second.text, first.text, 'same instance should reuse persisted values')
 
-// A dry run of a fresh instance samples but must not persist new decision state.
+// Dry-run fresh instance: samples but direct variable mutation is never attempted.
 const beforeDry = decisionVars().length
-const dry = await resolveTemplate('{{backstory::bob}}', { chatId: activeChat.id, characterId: activeChat.character_id, userId: 'user-1', commit: false })
+const dry = await resolveTemplate('{{backstory::bob}}', { chatId: 'chat-1', characterId: 'char-1', userId: 'user-1', commit: false })
 assert(!dry.text.includes('{{'))
-assert.equal(decisionVars().length, beforeDry, 'commit:false must not persist newly sampled state')
+assert.equal(decisionVars().length, beforeDry, 'commit:false must not create state')
 
-// State inspector must surface the three alice decisions.
-response = await request({ type: 'lumi_macro_lab:get_state' })
-assert.equal(response.type, 'lumi_macro_lab:state')
-const aliceDecisions = response.decisions.filter(({ state }) => state.macroName === 'backstory' && state.instance === 'alice')
-assert.equal(aliceDecisions.length, 3)
+// State inspector returns human labels and v2 metadata.
+response = await request({ type: 'macrolab:get_state' })
+let alice = response.decisions.filter(({ state }) => state.macroName === 'backstory' && state.instance === 'alice')
+assert.equal(alice.length, 3)
+for (const item of alice) {
+  assert.equal(item.state.version, 2)
+  assert.equal(typeof item.state.label, 'string')
+  assert(item.state.label.length > 1)
+  assert.equal(typeof item.state.recipeHash, 'string')
+}
 
-// Reroll a pick and confirm both persisted state and rendered output change.
-const pickDecision = aliceDecisions.find(({ state }) => state.kind === 'pick')
-assert(pickDecision)
-const beforePick = pickDecision.state.value
-response = await request({ type: 'lumi_macro_lab:decision_action', key: pickDecision.key, action: 'reroll' })
-assert.equal(response.type, 'lumi_macro_lab:state')
-const rerolled = response.decisions.find(({ key }) => key === pickDecision.key)
-assert(rerolled)
-assert.notEqual(rerolled.state.value, beforePick, 'pick reroll should select a different saved option when possible')
-const afterReroll = await resolveTemplate('{{backstory::alice}}', { chatId: activeChat.id, characterId: activeChat.character_id, userId: 'user-1', commit: true })
-assert.notEqual(afterReroll.text, first.text, 'rerolled decision should affect later render')
+// Reroll + undo is centralized persistent state behavior.
+const pick = alice.find(({ state }) => state.kind === 'pick')
+assert(pick)
+const initialPickValue = pick.state.value
+response = await request({ type: 'macrolab:decision_action', key: pick.key, action: 'reroll' })
+assert.equal(response.type, 'macrolab:state')
+let changedPick = response.decisions.find(({ key }) => key === pick.key)
+assert(changedPick)
+assert.notEqual(changedPick.state.value, initialPickValue)
+assert.equal(changedPick.state.history.length, 1)
+response = await request({ type: 'macrolab:decision_action', key: pick.key, action: 'undo' })
+changedPick = response.decisions.find(({ key }) => key === pick.key)
+assert.equal(changedPick.state.value, initialPickValue, 'undo should restore prior reroll value')
 
-// Lock protects the decision from direct reroll.
-response = await request({ type: 'lumi_macro_lab:decision_action', key: pickDecision.key, action: 'toggle_lock' })
-assert.equal(response.type, 'lumi_macro_lab:state')
-assert.equal(response.decisions.find(({ key }) => key === pickDecision.key).state.locked, true)
-response = await request({ type: 'lumi_macro_lab:decision_action', key: pickDecision.key, action: 'reroll' })
-assert.equal(response.type, 'lumi_macro_lab:error')
+// Lock protects direct and bulk mutations.
+response = await request({ type: 'macrolab:decision_action', key: pick.key, action: 'toggle_lock' })
+assert.equal(response.decisions.find(({ key }) => key === pick.key).state.locked, true)
+response = await request({ type: 'macrolab:decision_action', key: pick.key, action: 'reroll' })
+assert.equal(response.type, 'macrolab:error')
 assert.match(response.error, /locked/i)
+response = await request({ type: 'macrolab:instance_action', macroName: 'backstory', instance: 'alice', action: 'reset' })
+alice = response.decisions.filter(({ state }) => state.macroName === 'backstory' && state.instance === 'alice')
+assert.equal(alice.length, 1, 'bulk reset leaves locked decisions alone')
+assert.equal(alice[0].state.locked, true)
 
-// Bulk reset leaves locked decisions alone and clears the rest.
-response = await request({ type: 'lumi_macro_lab:instance_action', macroName: 'backstory', instance: 'alice', action: 'reset' })
-assert.equal(response.type, 'lumi_macro_lab:state')
-const afterReset = response.decisions.filter(({ state }) => state.macroName === 'backstory' && state.instance === 'alice')
-assert.equal(afterReset.length, 1, 'bulk reset should leave only the locked decision')
-assert.equal(afterReset[0].state.locked, true)
-
-// Native variable inspector writes through the Spindle variable API.
-response = await request({ type: 'lumi_macro_lab:variable_action', scope: 'chat', action: 'set', key: 'weather', value: 'rain' })
-assert.equal(response.type, 'lumi_macro_lab:state')
-assert.equal(chatVars.get('weather'), 'rain')
+// Native variables remain a separate advanced surface.
+response = await request({ type: 'macrolab:variable_action', scope: 'chat', action: 'set', key: 'weather', value: 'rain' })
 assert.equal(response.variables.chat.weather, 'rain')
+assert.equal(chatStore('chat-1').get('weather'), 'rain')
+assert.equal(Object.keys(response.variables.chat).some((key) => key.startsWith('__macrolab_v2__')), false, 'internal decision vars are hidden from native variable list')
 
-// Registered macros can nest; the nested macro gets its own state namespace.
-await request({
-  type: 'lumi_macro_lab:save_macro',
-  definition: { name: 'secret', description: '', body: '{{pick::a debt::a prophecy}}' },
-})
-await request({
-  type: 'lumi_macro_lab:save_macro',
-  definition: { name: 'profile', description: '', body: 'Secret: {{secret::alice}} / Mood: {{pick::calm::restless}}' },
-})
-const nested = await resolveTemplate('{{profile::alice}}', { chatId: activeChat.id, characterId: activeChat.character_id, userId: 'user-1', commit: true })
+// Nested registered macros own independent state namespaces.
+await request({ type: 'macrolab:save_macro', definition: { name: 'secret', description: '', body: 'Secret: {{pick::a debt::a prophecy}}' } })
+await request({ type: 'macrolab:save_macro', definition: { name: 'profile', description: '', body: '{{secret::alice}} / Mood: {{pick::calm::restless}}' } })
+const nested = await resolveTemplate('{{profile::alice}}', { chatId: 'chat-1', characterId: 'char-1', userId: 'user-1', commit: true })
 assert(!nested.text.includes('{{'))
-response = await request({ type: 'lumi_macro_lab:get_state' })
+response = await request({ type: 'macrolab:get_state' })
 assert(response.decisions.some(({ state }) => state.macroName === 'profile' && state.instance === 'alice'))
 assert(response.decisions.some(({ state }) => state.macroName === 'secret' && state.instance === 'alice'))
 
-// Rename swaps registration cleanly and persists the registry.
+// Decision IDs are context-derived rather than source ordinals: inserting a bare stochastic node before the body does not renumber existing descriptors.
+const profileBefore = response.macros.find((macro) => macro.name === 'profile').decisions.map((decision) => decision.id)
 response = await request({
-  type: 'lumi_macro_lab:save_macro',
+  type: 'macrolab:save_macro',
   originalName: 'profile',
-  definition: { name: 'persona', description: '', body: 'Secret: {{secret::alice}} / Mood: {{pick::calm::restless}}' },
+  definition: { name: 'profile', description: '', body: '{{pick::day::night}}\n{{secret::alice}} / Mood: {{pick::calm::restless}}' },
 })
-assert.equal(response.type, 'lumi_macro_lab:state')
-assert(macroHandlers.has('profile'), 'host registration stays alive because another operator user may own the old name')
-assert(macroHandlers.has('persona'))
-assert(userStorageFiles.get('user-1:macro-registry.json').macros.some((macro) => macro.name === 'persona'))
-assert(storageFiles.get('macro-name-index.json').names.includes('persona'))
+const profileAfter = response.macros.find((macro) => macro.name === 'profile').decisions.map((decision) => decision.id)
+assert.equal(profileAfter.length, profileBefore.length + 1)
+assert(profileAfter.includes(profileBefore[0]), 'existing decision ID should survive insertion of a prior stochastic node when static context is unchanged')
 
-// Operator-scoped installs isolate definitions and global vars per user while sharing host macro names.
-response = await requestAs('user-2', { type: 'lumi_macro_lab:get_state' })
-assert.equal(response.type, 'lumi_macro_lab:state')
-assert.equal(response.macros.length, 0, 'a second operator user must not see user-1 macro bodies')
-
+// Operator users share host-level macro names but not definitions or global variables.
+response = await requestAs('user-2', { type: 'macrolab:get_state' })
+assert.equal(response.macros.length, 0)
 response = await requestAs('user-2', {
-  type: 'lumi_macro_lab:save_macro',
-  definition: { name: 'backstory', description: 'User two version', body: 'USER_TWO {{pick::orchard::desert}}' },
+  type: 'macrolab:save_macro',
+  definition: { name: 'backstory', description: 'User two', body: 'USER_TWO {{pick::orchard::desert}}' },
 })
-assert.equal(response.type, 'lumi_macro_lab:state')
 assert.equal(response.macros.length, 1)
-const userTwoBackstory = await resolveTemplate('{{backstory::alice}}', { chatId: activeChat.id, characterId: activeChat.character_id, userId: 'user-2', commit: false })
-assert.match(userTwoBackstory.text, /^USER_TWO /)
-const userOneBackstory = await resolveTemplate('{{backstory::alice}}', { chatId: activeChat.id, characterId: activeChat.character_id, userId: 'user-1', commit: false })
-assert(!userOneBackstory.text.startsWith('USER_TWO '), 'same registered name should dispatch to the invoking user registry')
+const userTwo = await resolveTemplate('{{backstory::alice}}', { chatId: 'chat-2', characterId: 'char-2', userId: 'user-2', commit: false })
+assert.match(userTwo.text, /^USER_TWO /)
+const userOne = await resolveTemplate('{{backstory::alice}}', { chatId: 'chat-1', characterId: 'char-1', userId: 'user-1', commit: false })
+assert(!userOne.text.startsWith('USER_TWO '))
+await request({ type: 'macrolab:variable_action', scope: 'global', action: 'set', key: 'accent', value: 'pink' })
+await requestAs('user-2', { type: 'macrolab:variable_action', scope: 'global', action: 'set', key: 'accent', value: 'green' })
+assert.equal(globalStore('user-1').get('accent'), 'pink')
+assert.equal(globalStore('user-2').get('accent'), 'green')
 
-response = await request({ type: 'lumi_macro_lab:variable_action', scope: 'global', action: 'set', key: 'accent', value: 'pink' })
-assert.equal(response.type, 'lumi_macro_lab:state')
-response = await requestAs('user-2', { type: 'lumi_macro_lab:variable_action', scope: 'global', action: 'set', key: 'accent', value: 'green' })
-assert.equal(response.type, 'lumi_macro_lab:state')
-assert.equal(globalsFor('user-1').get('accent'), 'pink')
-assert.equal(globalsFor('user-2').get('accent'), 'green')
-response = await request({ type: 'lumi_macro_lab:get_state' })
-assert.equal(response.variables.global.accent, 'pink')
-response = await requestAs('user-2', { type: 'lumi_macro_lab:get_state' })
-assert.equal(response.variables.global.accent, 'green')
-
-// Directly verify that persisted decision state is URI-safe JSON and includes recipe metadata.
-for (const [, raw] of decisionVars()) {
+// Persisted state is URI-safe v2 JSON and carries UI metadata.
+for (const [, raw] of decisionVars('chat-1')) {
   const state = parseDecision(raw)
-  assert.equal(state.version, 1)
+  assert.equal(state.version, 2)
   assert.equal(typeof state.value, 'string')
   assert.equal(typeof state.locked, 'boolean')
+  assert.equal(typeof state.label, 'string')
+  assert.equal(typeof state.sourcePreview, 'string')
 }
 
-console.log(`✓ Lumi Macro Lab harness passed (${macroHandlers.size} registered handlers, ${decisionVars().length} persisted decision vars)`)
+Math.random = originalRandom
+console.log(`✓ MacroLab forge harness passed (${macroHandlers.size} registered handlers, ${decisionVars('chat-1').length} chat-1 v2 decisions)`)

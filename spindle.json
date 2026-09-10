@@ -1,11 +1,11 @@
 {
-  "version": "1.1.1",
-  "name": "Lumi Macro Lab",
-  "identifier": "lumi_macro_lab",
+  "version": "2.0.0-alpha.1",
+  "name": "MacroLab",
+  "identifier": "macrolab",
   "author": "kittyafterdark",
   "github": "https://github.com/kittyafterdark/LumiMacroLab",
   "homepage": "https://github.com/kittyafterdark/LumiMacroLab",
-  "description": "Inspect macro resolution, register reusable macros, and reroll sticky nested random decisions.",
+  "description": "Author reusable macros, inspect them in context with Pipette, and manipulate committed chat state from Hot Plate.",
   "permissions": [
     "chats"
   ],
