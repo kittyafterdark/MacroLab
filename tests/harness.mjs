@@ -295,11 +295,26 @@ alice = response.decisions.filter(({ state }) => state.macroName === 'backstory'
 assert.equal(alice.length, 1, 'bulk reset leaves locked decisions alone')
 assert.equal(alice[0].state.locked, true)
 
-// Native variables remain a separate advanced surface.
-response = await request({ type: 'macrolab:variable_action', scope: 'chat', action: 'set', key: 'weather', value: 'rain' })
+// Native variables remain a separate advanced surface, with MacroLab-authored keys tracked separately from preset/extension state.
+chatStore('chat-1').set('bookworm_arc', '2')
+response = await request({ type: 'macrolab:get_state' })
+assert.equal(response.variables.chat.bookworm_arc, '2')
+assert.deepEqual(response.authoredVariables.chat, [], 'pre-existing chat variables must not be claimed by MacroLab')
+
+response = await request({ type: 'macrolab:variable_action', scope: 'chat', action: 'set', key: 'weather', value: 'rain', authored: true })
 assert.equal(response.variables.chat.weather, 'rain')
 assert.equal(chatStore('chat-1').get('weather'), 'rain')
+assert(response.authoredVariables.chat.includes('weather'), 'variables created through MacroLab should be marked authored')
+assert.equal(response.authoredVariables.chat.includes('bookworm_arc'), false, 'external variables stay external')
+
+response = await request({ type: 'macrolab:variable_action', scope: 'chat', action: 'set', key: 'bookworm_arc', value: '3' })
+assert.equal(response.variables.chat.bookworm_arc, '3')
+assert.equal(response.authoredVariables.chat.includes('bookworm_arc'), false, 'editing an external variable must not claim ownership')
 assert.equal(Object.keys(response.variables.chat).some((key) => key.startsWith('__macrolab_v2__')), false, 'internal decision vars are hidden from native variable list')
+
+response = await request({ type: 'macrolab:variable_action', scope: 'chat', action: 'delete', key: 'weather' })
+assert.equal(response.variables.chat.weather, undefined)
+assert.equal(response.authoredVariables.chat.includes('weather'), false, 'deleting an authored variable should clear its ownership marker')
 
 // Nested registered macros own independent state namespaces.
 await request({ type: 'macrolab:save_macro', definition: { name: 'secret', description: '', body: 'Secret: {{pick::a debt::a prophecy}}' } })

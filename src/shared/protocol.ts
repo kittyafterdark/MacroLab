@@ -15,6 +15,12 @@ export type VariableSnapshot = {
   global: Record<string, string>
 }
 
+export type VariableOwnershipSnapshot = {
+  chat: string[]
+  local: string[]
+  global: string[]
+}
+
 export type MacroDefinition = {
   name: string
   description: string
@@ -80,6 +86,7 @@ export type VariableActionRequest = {
   action: 'set' | 'delete'
   key: string
   value?: string
+  authored?: boolean
 }
 
 export type FrontendRequest =
@@ -111,6 +118,7 @@ export type StateResult = {
   macros: MacroDefinitionView[]
   decisions: Array<{ key: string; state: DecisionState }>
   variables: VariableSnapshot
+  authoredVariables: VariableOwnershipSnapshot
   context: null | {
     id: string
     name: string

@@ -1,6 +1,6 @@
 {
   "name": "macrolab",
-  "version": "2.0.0-alpha.2",
+  "version": "2.0.0-alpha.3",
   "private": true,
   "type": "module",
   "description": "Dynamic macro authoring, contextual inspection, and chat-scoped sticky state for Lumiverse.",

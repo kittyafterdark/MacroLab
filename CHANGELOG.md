@@ -1,5 +1,22 @@
 # Changelog
 
+## 2.0.0-alpha.3 — Contextual surface weld
+
+### Surface UX
+
+- Moves the Hot Plate launcher to `chat_toolbar`, with `chat_input_tools_right` retained only as a fail-closed fallback when the toolbar mount is unavailable.
+- Prefers `lorebook_workspace` for the World Book Pipette launcher, falling back to `world_book_entry_toolbar` for hosts/layouts that do not expose the workspace mount.
+- Replaces DOM-flavored `textarea` / `text field` labels with semantic surface copy such as `World Book entry · Content`.
+- Pipette now preserves registered macro instances such as `backstory · dan` instead of collapsing every invocation to the macro name.
+- Pipette can create missing MacroLab definitions directly from an unregistered reference, create-and-insert a new macro, and edit registered definitions without bouncing through the drawer.
+
+### Native variables
+
+- Tracks variables explicitly created through MacroLab separately from variables discovered from presets, other extensions, or host state.
+- Keeps MacroLab-authored variables expanded and places external/discovered variables in collapsed `Other <scope> variables` drawers with counts.
+- Editing an external variable does not claim ownership. Deleting one now requires confirmation because another system may depend on it.
+- Ownership metadata is extension storage only; MacroLab does not rename or wrap native host variables.
+
 ## 2.0.0-alpha.2 — Self-contained Spindle entries
 
 ### Packaging

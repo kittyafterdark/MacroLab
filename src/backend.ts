@@ -18,12 +18,14 @@ import type {
   SaveMacroRequest,
   VariableActionRequest,
   VariableSnapshot,
+  VariableOwnershipSnapshot,
 } from './shared/protocol.js'
 
 declare const spindle: any
 
 const REGISTRY_PATH = 'macro-registry.json'
 const REGISTRY_NAME_INDEX_PATH = 'macro-name-index.json'
+const VARIABLE_OWNERSHIP_PATH = 'variable-ownership.json'
 const OWNER_REGISTRY_KEY = '__owner__'
 const INTERNAL_PICK = 'mlDecisionPickV2'
 const INTERNAL_RANDOM = 'mlDecisionRandomV2'
@@ -37,6 +39,13 @@ const MACRO_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]*$/
 type RegistryFile = {
   version: 1
   macros: MacroDefinition[]
+}
+
+type VariableOwnershipFile = {
+  version: 1
+  global: string[]
+  chat: Record<string, string[]>
+  local: Record<string, string[]>
 }
 
 type InvocationIds = {
@@ -65,6 +74,67 @@ function normalizeVariableMap(value: unknown): Record<string, string> {
   const normalized: Record<string, string> = {}
   for (const [key, entry] of Object.entries(value)) normalized[key] = typeof entry === 'string' ? entry : String(entry ?? '')
   return normalized
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return [...new Set(value.map((entry) => String(entry ?? '').trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b))
+}
+
+function normalizeOwnershipFile(value: unknown): VariableOwnershipFile {
+  const source = isRecord(value) ? value : {}
+  const normalizeByChat = (input: unknown): Record<string, string[]> => {
+    if (!isRecord(input)) return {}
+    const out: Record<string, string[]> = {}
+    for (const [chatId, entries] of Object.entries(input)) {
+      const keys = normalizeStringList(entries)
+      if (keys.length) out[chatId] = keys
+    }
+    return out
+  }
+  return {
+    version: 1,
+    global: normalizeStringList(source.global),
+    chat: normalizeByChat(source.chat),
+    local: normalizeByChat(source.local),
+  }
+}
+
+async function readVariableOwnership(userId: string): Promise<VariableOwnershipFile> {
+  const stored = await spindle.userStorage.getJson(VARIABLE_OWNERSHIP_PATH, {
+    fallback: { version: 1, global: [], chat: {}, local: {} } satisfies VariableOwnershipFile,
+    ...(userId ? { userId } : {}),
+  })
+  return normalizeOwnershipFile(stored)
+}
+
+async function writeVariableOwnership(userId: string, ownership: VariableOwnershipFile): Promise<void> {
+  await spindle.userStorage.setJson(VARIABLE_OWNERSHIP_PATH, ownership, { indent: 2, ...(userId ? { userId } : {}) })
+}
+
+function ownershipSnapshot(ownership: VariableOwnershipFile, chatId: string): VariableOwnershipSnapshot {
+  return {
+    global: [...ownership.global],
+    chat: chatId ? [...(ownership.chat[chatId] ?? [])] : [],
+    local: chatId ? [...(ownership.local[chatId] ?? [])] : [],
+  }
+}
+
+function setOwnedVariable(ownership: VariableOwnershipFile, scope: 'local' | 'chat' | 'global', chatId: string, key: string, owned: boolean): void {
+  if (scope === 'global') {
+    const next = new Set(ownership.global)
+    if (owned) next.add(key)
+    else next.delete(key)
+    ownership.global = [...next].sort((a, b) => a.localeCompare(b))
+    return
+  }
+  if (!chatId) return
+  const bucket = ownership[scope]
+  const next = new Set(bucket[chatId] ?? [])
+  if (owned) next.add(key)
+  else next.delete(key)
+  if (next.size) bucket[chatId] = [...next].sort((a, b) => a.localeCompare(b))
+  else delete bucket[chatId]
 }
 
 function isFrontendRequest(payload: unknown): payload is FrontendRequest {
@@ -498,13 +568,15 @@ function publicVariables(input: Record<string, string>): Record<string, string> 
 async function activeContext(userId: string): Promise<{
   activeChat: any
   variables: VariableSnapshot
+  authoredVariables: VariableOwnershipSnapshot
   decisions: Array<{ key: string; state: DecisionState }>
 }> {
   const activeChat = await spindle.chats.getActive(userId)
-  const [chatRaw, localRaw, globalRaw] = await Promise.all([
+  const [chatRaw, localRaw, globalRaw, ownership] = await Promise.all([
     activeChat?.id ? spindle.variables.chat.list(activeChat.id) : Promise.resolve({}),
     activeChat?.id ? spindle.variables.local.list(activeChat.id) : Promise.resolve({}),
     globalVariablesList(userId),
+    readVariableOwnership(userId),
   ])
   const chat = normalizeVariableMap(chatRaw)
   const local = normalizeVariableMap(localRaw)
@@ -522,6 +594,7 @@ async function activeContext(userId: string): Promise<{
   return {
     activeChat,
     variables: { chat: publicVariables(chat), local: publicVariables(local), global: publicVariables(globalRaw) },
+    authoredVariables: ownershipSnapshot(ownership, String(activeChat?.id ?? '')),
     decisions,
   }
 }
@@ -537,7 +610,7 @@ function macroViews(userId: string): MacroDefinitionView[] {
 }
 
 async function sendState(userId: string, requestId: string, notice = ''): Promise<void> {
-  const { activeChat, variables, decisions } = await activeContext(userId)
+  const { activeChat, variables, authoredVariables, decisions } = await activeContext(userId)
   spindle.sendToFrontend({
     type: 'macrolab:state',
     requestId,
@@ -545,6 +618,7 @@ async function sendState(userId: string, requestId: string, notice = ''): Promis
     macros: macroViews(userId),
     decisions,
     variables,
+    authoredVariables,
     context: activeChat
       ? {
           id: String(activeChat.id),
@@ -753,16 +827,24 @@ async function variableAction(userId: string, request: VariableActionRequest): P
 
   const activeChat = request.scope === 'global' ? null : await spindle.chats.getActive(userId)
   if (request.scope !== 'global' && !activeChat?.id) throw new Error('Open a chat first to edit chat/local variables.')
+  const chatId = String(activeChat?.id ?? '')
+  const ownership = await readVariableOwnership(userId)
 
   if (request.action === 'delete') {
     if (request.scope === 'global') await globalVariableDelete(userId, key)
     else await spindle.variables[request.scope].delete(activeChat.id, key)
+    setOwnedVariable(ownership, request.scope, chatId, key, false)
+    await writeVariableOwnership(userId, ownership)
     return `Deleted ${request.scope} variable ${key}.`
   }
 
   const value = String(request.value ?? '')
   if (request.scope === 'global') await globalVariableSet(userId, key, value)
   else await spindle.variables[request.scope].set(activeChat.id, key, value)
+  if (request.authored === true) {
+    setOwnedVariable(ownership, request.scope, chatId, key, true)
+    await writeVariableOwnership(userId, ownership)
+  }
   return `Updated ${request.scope} variable ${key}.`
 }
 

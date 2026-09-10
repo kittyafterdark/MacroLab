@@ -21,16 +21,23 @@ type Cleanup = () => void
 type EditableTarget = HTMLTextAreaElement | HTMLInputElement | HTMLElement
 
 type SurfaceSpec = {
-  point: string
+  points: string[]
   label: string
 }
 
 const PIPETTE_SURFACES: SurfaceSpec[] = [
-  { point: 'world_book_entry_toolbar', label: 'World Book entry' },
-  { point: 'preset_editor_toolbar', label: 'Preset editor' },
-  { point: 'loom_builder_toolbar', label: 'Loom builder' },
-  { point: 'prompt_variables_toolbar', label: 'Prompt variables' },
+  { points: ['lorebook_workspace', 'world_book_entry_toolbar'], label: 'World Book entry' },
+  { points: ['preset_editor_toolbar'], label: 'Preset editor' },
+  { points: ['loom_builder_toolbar'], label: 'Loom builder' },
+  { points: ['prompt_variables_toolbar'], label: 'Prompt variables' },
 ]
+
+const MACRO_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]*$/
+const COMMON_NATIVE_MACROS = new Set([
+  'char', 'user', 'persona', 'system', 'date', 'time', 'weekday',
+  'pick', 'random', 'getvar', 'setvar', 'getchatvar', 'setchatvar',
+  'getglobalvar', 'setglobalvar', 'getlocalvar', 'setlocalvar',
+])
 
 function requestId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
@@ -160,6 +167,10 @@ export function setup(ctx: any): Cleanup {
   let lastEditable: EditableTarget | null = null
   let hotPlateModal: any = null
   let pipetteModal: any = null
+  let quickMacroModal: any = null
+  let quickMacroStatus: HTMLElement | null = null
+  let quickMacroSaveButton: HTMLButtonElement | null = null
+  let pendingQuickMacroSave: null | { requestId: string; name: string; afterSave?: (definition: MacroDefinitionView) => void } = null
   let pipetteRender: (() => void) | null = null
   let hotPlateRender: (() => void) | null = null
   let pendingResolve = ''
@@ -230,12 +241,23 @@ export function setup(ctx: any): Cleanup {
     .ml-notice { padding:8px 9px; border-radius:8px; background:var(--lumiverse-fill-subtle,rgba(127,127,127,.08)); border:1px solid var(--lumiverse-border,rgba(127,127,127,.2)); font-size:10px; line-height:1.45; }
     .ml-status[data-kind="error"] { color:var(--lumiverse-danger,#d96a6a); }
     .ml-status[data-kind="success"] { color:var(--lumiverse-success,#73b886); }
+    .ml-feedback[data-kind="error"] { color:var(--lumiverse-danger,#d96a6a); }
+    .ml-feedback[data-kind="success"] { color:var(--lumiverse-success,#73b886); }
     .ml-ref { display:flex; gap:8px; align-items:flex-start; padding:8px; border-radius:8px; background:var(--lumiverse-fill,rgba(127,127,127,.05)); border:1px solid var(--lumiverse-border,rgba(127,127,127,.18)); }
     .ml-ref-count { min-width:24px; text-align:center; }
     .ml-diagnostics { margin:0; padding:9px 9px 9px 25px; border:1px solid var(--lumiverse-border,rgba(127,127,127,.22)); border-radius:9px; font-size:10px; line-height:1.45; }
     .ml-variable-scope { display:flex; flex-direction:column; gap:6px; }
     .ml-variable-row { display:flex; align-items:flex-start; gap:8px; padding:7px 0; border-top:1px solid var(--lumiverse-border,rgba(127,127,127,.14)); }
     .ml-variable-row:first-of-type { border-top:0; }
+    .ml-variable-group { display:flex; flex-direction:column; gap:6px; }
+    .ml-variable-group + .ml-variable-group { margin-top:4px; }
+    .ml-variable-details { border-top:1px solid var(--lumiverse-border,rgba(127,127,127,.16)); padding-top:6px; }
+    .ml-variable-details > summary { cursor:pointer; list-style:none; display:flex; align-items:center; justify-content:space-between; gap:8px; padding:5px 0; font-size:10px; font-weight:800; }
+    .ml-variable-details > summary::-webkit-details-marker { display:none; }
+    .ml-variable-details > summary::before { content:'▸'; width:12px; flex:0 0 12px; color:var(--lumiverse-text-muted,currentColor); }
+    .ml-variable-details[open] > summary::before { content:'▾'; }
+    .ml-variable-details-body { display:flex; flex-direction:column; gap:0; }
+    .ml-subheading { font-size:9px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; color:var(--lumiverse-text-muted,currentColor); }
     @media (max-width:560px) {
       .ml-shell { padding:10px; }
       .ml-macro-card, .ml-decision, .ml-row { flex-direction:column; }
@@ -391,6 +413,93 @@ export function setup(ctx: any): Cleanup {
       definition: { name, description: macroDescription.value, body: macroBody.value },
     }, 'Saving macro…')
   })
+
+  const openSurfaceMacroForm = (options: {
+    definition?: MacroDefinitionView
+    initialName?: string
+    afterSave?: (definition: MacroDefinitionView) => void
+  } = {}) => {
+    const returnTarget = lastEditable?.isConnected ? lastEditable : null
+    quickMacroModal?.dismiss?.()
+    const definition = options.definition
+    quickMacroModal = ctx.ui.showModal({ title: definition ? `Edit {{${definition.name}}}` : 'Create MacroLab macro', width: 620, maxHeight: 760 })
+    const root = quickMacroModal.root as HTMLElement
+    const form = el('section', 'ml-root ml-modal')
+    const header = el('div', 'ml-surface-header')
+    header.append(iconMarkup(MACROLAB_BEAKER_ICON, 'ml-surface-icon'))
+    const headerCopy = el('div', 'ml-grow')
+    headerCopy.append(
+      el('strong', 'ml-title', definition ? 'Edit registered macro' : 'Create registered macro'),
+      el('div', 'ml-meta', 'Create it here; MacroLab proper is for the full workshop, not a prerequisite.'),
+    )
+    header.append(headerCopy)
+
+    const nameInput = el('input', 'ml-input')
+    nameInput.placeholder = 'backstory'
+    nameInput.value = definition?.name ?? options.initialName ?? ''
+    const descriptionInput = el('input', 'ml-input')
+    descriptionInput.placeholder = 'Optional description'
+    descriptionInput.value = definition?.description ?? ''
+    const bodyInput = el('textarea', 'ml-editor ml-editor-large')
+    bodyInput.spellcheck = false
+    bodyInput.placeholder = 'Born in {{pick::a coastal city::a mountain village}}…'
+    bodyInput.value = definition?.body ?? ''
+    const preview = el('div', 'ml-small ml-muted')
+    const statusLine = el('div', 'ml-small ml-muted ml-feedback')
+    statusLine.setAttribute('aria-live', 'polite')
+    quickMacroStatus = statusLine
+    const updatePreview = () => {
+      const refs = scanMacroReferences(bodyInput.value)
+      const stochastic = refs.filter((ref) => ['pick', 'random'].includes(ref.name.toLowerCase())).length
+      preview.textContent = `${bodyInput.value.length.toLocaleString()} characters · ${stochastic} inline stochastic reference${stochastic === 1 ? '' : 's'}`
+    }
+    bodyInput.addEventListener('input', updatePreview)
+    updatePreview()
+
+    const actions = el('div', 'ml-actions')
+    const save = button(definition ? 'Save changes' : 'Create macro', 'ml-button-primary')
+    quickMacroSaveButton = save
+    const cancel = button('Cancel')
+    actions.append(save, cancel)
+    cancel.addEventListener('click', () => quickMacroModal?.dismiss?.())
+    save.addEventListener('click', () => {
+      const name = nameInput.value.trim()
+      if (!name || !bodyInput.value.trim()) {
+        statusLine.textContent = 'Macro name and body are required.'
+        statusLine.dataset.kind = 'error'
+        return
+      }
+      if (!MACRO_NAME_RE.test(name)) {
+        statusLine.textContent = 'Names must start with a letter and contain only letters, numbers, _ or -.'
+        statusLine.dataset.kind = 'error'
+        return
+      }
+      save.disabled = true
+      statusLine.textContent = 'Saving…'
+      const id = send({
+        type: 'macrolab:save_macro',
+        originalName: definition?.name,
+        definition: { name, description: descriptionInput.value, body: bodyInput.value },
+      })
+      pendingQuickMacroSave = { requestId: id, name, afterSave: options.afterSave }
+    })
+
+    const field = (label: string, control: HTMLElement) => {
+      const wrapper = el('div', 'ml-field')
+      wrapper.append(el('label', '', label), control)
+      return wrapper
+    }
+    form.append(header, field('Macro name', nameInput), field('Description', descriptionInput), field('Macro body', bodyInput), preview, statusLine, actions)
+    root.replaceChildren(form)
+    quickMacroModal.onDismiss(() => {
+      if (pendingQuickMacroSave) pendingQuickMacroSave.afterSave = undefined
+      if (returnTarget?.isConnected) lastEditable = returnTarget
+      quickMacroModal = null
+      quickMacroStatus = null
+      quickMacroSaveButton = null
+    })
+    nameInput.focus()
+  }
 
   // Resolution
   const resolutionIntro = el('div', 'ml-notice', 'Preview mode uses the real macro resolver with commit:false. Existing Hot Plate state is honored; missing choices are sampled ephemerally and never become canon.')
@@ -589,13 +698,46 @@ export function setup(ctx: any): Cleanup {
     }
   }
 
-  const variableAction = (scope: VariableScope, action: 'set' | 'delete', key: string, value?: string) => {
-    send({ type: 'macrolab:variable_action', scope, action, key, value }, `${action === 'set' ? 'Updating' : 'Deleting'} ${scope} variable…`)
+  const variableAction = (scope: VariableScope, action: 'set' | 'delete', key: string, value?: string, authored = false) => {
+    send({ type: 'macrolab:variable_action', scope, action, key, value, authored }, `${action === 'set' ? 'Updating' : 'Deleting'} ${scope} variable…`)
   }
 
   const renderVariables = (state: StateResult | null) => {
     variableList.replaceChildren()
     const snapshot = state?.variables ?? { local: {}, chat: {}, global: {} }
+    const ownedSnapshot = state?.authoredVariables ?? { local: [], chat: [], global: [] }
+
+    const appendVariableRow = (parent: HTMLElement, scope: VariableScope, key: string, value: string, owned: boolean) => {
+      const row = el('div', 'ml-variable-row')
+      const main = el('div', 'ml-grow')
+      const title = el('div', 'ml-inline')
+      title.append(el('div', 'ml-title ml-code', `${scopePrefix(scope)}${key}`))
+      if (owned) title.append(el('span', 'ml-pill', 'MacroLab'))
+      main.append(title, el('div', 'ml-value', value === '' ? '""' : value))
+      const actions = el('div', 'ml-actions')
+      const edit = button('Edit')
+      const remove = button('Delete', 'ml-button-danger')
+      edit.addEventListener('click', () => {
+        const next = window.prompt(`Value for ${scopePrefix(scope)}${key}:`, value)
+        if (next !== null) variableAction(scope, 'set', key, next, owned)
+      })
+      remove.addEventListener('click', async () => {
+        if (!owned) {
+          const result = await ctx.ui.showConfirm({
+            title: `Delete ${scopePrefix(scope)}${key}?`,
+            message: 'MacroLab did not create this variable. It may belong to a preset or another extension.',
+            variant: 'danger',
+            confirmLabel: 'Delete variable',
+          })
+          if (!result?.confirmed) return
+        }
+        variableAction(scope, 'delete', key)
+      })
+      actions.append(edit, remove)
+      row.append(main, actions)
+      parent.append(row)
+    }
+
     for (const scope of ['local', 'chat', 'global'] as VariableScope[]) {
       const section = el('section', 'ml-variable-scope')
       const heading = el('div', 'ml-heading')
@@ -607,27 +749,33 @@ export function setup(ctx: any): Cleanup {
         if (!key) return
         const value = window.prompt(`Value for ${scopePrefix(scope)}${key}:`, '')
         if (value === null) return
-        variableAction(scope, 'set', key, value)
+        variableAction(scope, 'set', key, value, true)
       })
       section.append(heading)
+
       const entries = Object.entries(snapshot[scope]).sort(([a], [b]) => a.localeCompare(b))
-      if (!entries.length) section.append(el('div', 'ml-meta', `No ${scope} variables.`))
-      for (const [key, value] of entries) {
-        const row = el('div', 'ml-variable-row')
-        const main = el('div', 'ml-grow')
-        main.append(el('div', 'ml-title ml-code', `${scopePrefix(scope)}${key}`), el('div', 'ml-value', value === '' ? '""' : value))
-        const actions = el('div', 'ml-actions')
-        const edit = button('Edit')
-        const remove = button('Delete', 'ml-button-danger')
-        edit.addEventListener('click', () => {
-          const next = window.prompt(`Value for ${scopePrefix(scope)}${key}:`, value)
-          if (next !== null) variableAction(scope, 'set', key, next)
-        })
-        remove.addEventListener('click', () => variableAction(scope, 'delete', key))
-        actions.append(edit, remove)
-        row.append(main, actions)
-        section.append(row)
+      const owned = new Set(ownedSnapshot[scope])
+      const authoredEntries = entries.filter(([key]) => owned.has(key))
+      const externalEntries = entries.filter(([key]) => !owned.has(key))
+
+      const authoredGroup = el('div', 'ml-variable-group')
+      authoredGroup.append(el('div', 'ml-subheading', 'MacroLab variables'))
+      if (!authoredEntries.length) authoredGroup.append(el('div', 'ml-meta', 'No variables created here yet.'))
+      for (const [key, value] of authoredEntries) appendVariableRow(authoredGroup, scope, key, value, true)
+      section.append(authoredGroup)
+
+      if (externalEntries.length) {
+        const details = el('details', 'ml-variable-details')
+        const summary = el('summary')
+        summary.append(el('span', '', `Other ${scope} variables`), el('span', 'ml-pill', String(externalEntries.length)))
+        const body = el('div', 'ml-variable-details-body')
+        for (const [key, value] of externalEntries) appendVariableRow(body, scope, key, value, false)
+        details.append(summary, body)
+        section.append(details)
+      } else if (!entries.length) {
+        section.append(el('div', 'ml-meta', `No other ${scope} variables detected.`))
       }
+
       variableList.append(section)
     }
   }
@@ -682,7 +830,7 @@ export function setup(ctx: any): Cleanup {
   }
 
   const launcherNodes: Array<{ button: HTMLButtonElement; badge?: HTMLElement }> = []
-  const mountLauncher = (point: string, label: string, onClick: () => void, withBadge = false) => {
+  const mountLauncher = (point: string, label: string, onClick: () => void, withBadge = false): HTMLButtonElement | null => {
     try {
       const host = ctx.ui.mount(point)
       const node = iconButton(MACROLAB_BEAKER_ICON, label, 'ml-launcher')
@@ -696,12 +844,23 @@ export function setup(ctx: any): Cleanup {
       host.append(node)
       launcherNodes.push({ button: node, badge })
       cleanups.push(() => node.remove())
+      return node
     } catch (error) {
       console.warn(`[MacroLab] Could not mount ${point}:`, error)
+      return null
     }
   }
 
-  mountLauncher('chat_input_tools_right', 'Open MacroLab Hot Plate', openHotPlate, true)
+  const mountFirstAvailable = (points: string[], label: string, onClick: () => void, withBadge = false): HTMLButtonElement | null => {
+    for (const point of points) {
+      const mounted = mountLauncher(point, label, onClick, withBadge)
+      if (mounted) return mounted
+    }
+    return null
+  }
+
+  // Hot Plate is chat-wide state, so prefer the chat toolbar rather than sitting beside Send.
+  mountFirstAvailable(['chat_toolbar', 'chat_input_tools_right'], 'Open MacroLab Hot Plate', openHotPlate, true)
 
   // Pipette ---------------------------------------------------------------
   const renderPipette = (surfaceLabel: string) => {
@@ -725,67 +884,102 @@ export function setup(ctx: any): Cleanup {
     const text = editableText(target)
     const refs = scanMacroReferences(text)
     const macroMap = new Map((latestState?.macros ?? []).map((macro) => [macro.name.toLowerCase(), macro]))
-    const counts = new Map<string, { name: string; count: number; definition?: MacroDefinitionView; kind: 'registered' | 'stochastic' | 'native' }>()
+    type PipetteItem = {
+      name: string
+      args: string[]
+      count: number
+      definition?: MacroDefinitionView
+      kind: 'registered' | 'stochastic' | 'native' | 'external'
+    }
+    const counts = new Map<string, PipetteItem>()
     for (const ref of refs) {
       const lower = ref.name.toLowerCase()
       const definition = macroMap.get(lower)
-      const kind = definition ? 'registered' : (lower === 'pick' || lower === 'random' ? 'stochastic' : 'native')
-      const existing = counts.get(lower)
+      const kind: PipetteItem['kind'] = definition
+        ? 'registered'
+        : (lower === 'pick' || lower === 'random')
+          ? 'stochastic'
+          : COMMON_NATIVE_MACROS.has(lower)
+            ? 'native'
+            : 'external'
+      const args = definition ? ref.args.map((value) => String(value ?? '').trim()).filter(Boolean) : []
+      const key = `${lower}\u0000${args.join('::')}`
+      const existing = counts.get(key)
       if (existing) existing.count += 1
-      else counts.set(lower, { name: ref.name, count: 1, definition, kind })
+      else counts.set(key, { name: ref.name, args, count: 1, definition, kind })
     }
 
     const targetCard = el('section', 'ml-card')
     targetCard.append(
-      el('h2', 'ml-label', 'Current field'),
-      el('div', 'ml-title', targetLabel(target)),
+      el('h2', 'ml-label', 'Current surface'),
+      el('div', 'ml-title', `${surfaceLabel} · Content`),
       el('div', 'ml-meta', `${text.length.toLocaleString()} characters · ${refs.length} macro reference${refs.length === 1 ? '' : 's'}`),
     )
 
     const foundCard = el('section', 'ml-card')
     foundCard.append(el('h2', 'ml-label', 'Detected here'))
-    if (!counts.size) foundCard.append(el('div', 'ml-empty', 'No macro references in this field yet. Use the registered list below to insert one.'))
-    for (const item of [...counts.values()].sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!counts.size) foundCard.append(el('div', 'ml-empty', 'No macro references in this field yet. Insert an existing macro below or create one here.'))
+    for (const item of [...counts.values()].sort((a, b) => `${a.name}\u0000${a.args.join('::')}`.localeCompare(`${b.name}\u0000${b.args.join('::')}`))) {
       const row = el('div', 'ml-ref')
       const count = el('span', 'ml-pill ml-ref-count', String(item.count))
       const main = el('div', 'ml-grow')
       const title = el('div', 'ml-inline')
-      title.append(el('strong', 'ml-title ml-code', `{{${item.name}}}`), el('span', 'ml-pill', item.kind))
+      const invocation = item.args.length ? `${item.name} · ${item.args.join('::')}` : item.name
+      title.append(el('strong', 'ml-title', invocation), el('span', 'ml-pill', item.kind === 'external' ? 'not in MacroLab' : item.kind))
       if (item.definition) title.append(el('span', 'ml-pill', `${item.definition.decisions.length} sticky`))
+      const rawRef = item.args.length ? `{{${item.name}::${item.args.join('::')}}}` : `{{${item.name}}}`
       const meta = item.definition
-        ? (item.definition.description || `${item.definition.body.length.toLocaleString()} character registered macro`)
-        : item.kind === 'stochastic' ? 'Inline stochastic macro' : 'Native or external macro reference'
+        ? `${rawRef} · ${item.definition.description || `${item.definition.body.length.toLocaleString()} character registered macro`}`
+        : item.kind === 'stochastic'
+          ? `${rawRef} · inline stochastic macro`
+          : item.kind === 'native'
+            ? `${rawRef} · native macro`
+            : `${rawRef} · external or unregistered macro reference`
       main.append(title, el('div', 'ml-meta', meta))
       const actions = el('div', 'ml-actions')
       if (item.definition) {
-        const edit = button('Open in Lab')
-        edit.addEventListener('click', () => {
-          pipetteModal?.dismiss()
-          tab.activate()
-          switchDrawer('macros')
-          openMacroForm(item.definition)
-        })
+        const edit = button('Edit')
+        edit.addEventListener('click', () => openSurfaceMacroForm({ definition: item.definition }))
         actions.append(edit)
+      } else if (item.kind === 'external' && MACRO_NAME_RE.test(item.name)) {
+        const create = button('Create definition', 'ml-button-primary')
+        create.addEventListener('click', () => openSurfaceMacroForm({ initialName: item.name }))
+        actions.append(create)
       }
       row.append(count, main, actions)
       foundCard.append(row)
     }
 
     const insertCard = el('section', 'ml-card')
-    insertCard.append(el('h2', 'ml-label', 'Insert registered macro'))
+    const insertHeading = el('div', 'ml-heading')
+    insertHeading.append(el('h2', 'ml-label', 'Insert registered macro'))
+    const createNew = button('+ New macro')
+    createNew.addEventListener('click', () => openSurfaceMacroForm({
+      afterSave: (definition) => {
+        if (!target.isConnected) return
+        insertIntoEditable(target, `{{${definition.name}}}`)
+        lastEditable = target
+      },
+    }))
+    insertHeading.append(createNew)
+    insertCard.append(insertHeading)
     const macros = latestState?.macros ?? []
-    if (!macros.length) insertCard.append(el('div', 'ml-meta', 'No registered macros yet. Open MacroLab to create one.'))
+    if (!macros.length) insertCard.append(el('div', 'ml-meta', 'No registered macros yet. Create one here and Pipette can insert it without leaving this editor.'))
     for (const macro of macros) {
       const row = el('div', 'ml-ref')
       const main = el('div', 'ml-grow')
       main.append(el('strong', 'ml-title ml-code', `{{${macro.name}}}`), el('div', 'ml-meta', `${macro.decisions.length} sticky decision${macro.decisions.length === 1 ? '' : 's'}${macro.description ? ` · ${macro.description}` : ''}`))
+      const actions = el('div', 'ml-actions')
       const insert = button('Insert')
+      const edit = button('Edit')
       insert.addEventListener('click', () => {
         insertIntoEditable(target, `{{${macro.name}}}`)
         lastEditable = target
         renderPipette(surfaceLabel)
       })
-      row.append(main, insert)
+      edit.addEventListener('click', () => openSurfaceMacroForm({ definition: macro }))
+      actions.append(insert, edit)
+      row.append(main, actions)
       insertCard.append(row)
     }
 
@@ -806,7 +1000,9 @@ export function setup(ctx: any): Cleanup {
     refreshState()
   }
 
-  for (const surface of PIPETTE_SURFACES) mountLauncher(surface.point, `Open MacroLab Pipette for ${surface.label}`, () => openPipette(surface.label))
+  for (const surface of PIPETTE_SURFACES) {
+    mountFirstAvailable(surface.points, `Open MacroLab Pipette for ${surface.label}`, () => openPipette(surface.label))
+  }
 
   // Backend messages ------------------------------------------------------
   const updateLaunchers = () => {
@@ -821,6 +1017,13 @@ export function setup(ctx: any): Cleanup {
 
   const applyState = (state: StateResult) => {
     latestState = state
+    if (pendingQuickMacroSave?.requestId === state.requestId && state.notice?.startsWith('Saved ')) {
+      const pending = pendingQuickMacroSave
+      pendingQuickMacroSave = null
+      const definition = state.macros.find((macro) => macro.name === pending.name)
+      quickMacroModal?.dismiss?.()
+      if (definition) pending.afterSave?.(definition)
+    }
     renderMacros(state)
     renderRawState(state)
     updateLaunchers()
@@ -868,6 +1071,14 @@ export function setup(ctx: any): Cleanup {
         resolveButton.disabled = false
       }
       pendingState.delete(failure.requestId)
+      if (pendingQuickMacroSave?.requestId === failure.requestId) {
+        pendingQuickMacroSave = null
+        if (quickMacroStatus) {
+          quickMacroStatus.textContent = failure.error
+          quickMacroStatus.dataset.kind = 'error'
+        }
+        if (quickMacroSaveButton) quickMacroSaveButton.disabled = false
+      }
       setDrawerStatus(failure.error, 'error')
     }
   })
@@ -897,6 +1108,7 @@ export function setup(ctx: any): Cleanup {
   return () => {
     hotPlateModal?.dismiss?.()
     pipetteModal?.dismiss?.()
+    quickMacroModal?.dismiss?.()
     for (const cleanup of cleanups.reverse()) {
       try { cleanup() } catch { /* cleanup is best effort */ }
     }

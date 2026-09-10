@@ -7,8 +7,8 @@ The first forge deliberately uses only a small subset of the available Spindle m
 | Surface | Mount | Purpose |
 | --- | --- | --- |
 | MacroLab | drawer tab | full authoring, Resolution preview, raw state + native variables |
-| Hot Plate | `chat_input_tools_right` | compact runtime launcher; badge reflects committed active-chat decisions |
-| Pipette | `world_book_entry_toolbar` | inspect/insert macros in the focused World Book entry field |
+| Hot Plate | `chat_toolbar` (fallback: `chat_input_tools_right`) | compact runtime launcher; badge reflects committed active-chat decisions |
+| Pipette | `lorebook_workspace` (fallback: `world_book_entry_toolbar`) | inspect/create/edit/insert macros in the focused World Book entry field |
 | Pipette | `preset_editor_toolbar` | inspect/insert macros in the focused preset field |
 | Pipette | `loom_builder_toolbar` | inspect/insert macros in the focused Loom builder field |
 | Pipette | `prompt_variables_toolbar` | inspect/insert macros in the focused prompt-variable field |
@@ -30,6 +30,14 @@ Likely future uses, once backed by actual behavior:
 
 ## Pipette targeting
 
-Canonical toolbar mounts provide a location to render extension UI but do not, in the forge contract, hand MacroLab the semantic text field being edited. Pipette therefore keeps the last focused `textarea`, textual `input`, or `contenteditable` element.
+Canonical mounts provide a location to render extension UI but do not, in the forge contract, hand MacroLab the semantic text field being edited. Pipette therefore keeps the last focused `textarea`, textual `input`, or `contenteditable` element.
 
 If that target is gone and exactly one visible editable field exists, it can be inferred. If several are visible, Pipette fails closed and asks the user to focus one rather than mutating an ambiguous editor.
+
+## Contextual authoring
+
+Pipette is no longer a read-only jump point into the drawer. Missing MacroLab references can be defined in place, registered definitions can be edited in place, and a new macro can be created and inserted without leaving the active editor. The full MacroLab drawer remains the global workshop rather than a prerequisite.
+
+## Native-variable ownership
+
+MacroLab records a small user-scoped ownership index only when a variable is explicitly created through its `+ Add` flow. Existing preset/extension variables remain discoverable but collapsed by default. Editing a discovered variable does not claim it; deletion requires confirmation.

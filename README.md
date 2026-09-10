@@ -13,7 +13,7 @@ The full drawer is the workshop. It contains:
 - registered macro authoring and editing;
 - a real `commit:false` Resolution preview;
 - a raw state inspector with stable decision ids and revisions;
-- native local/chat/global variable editing for debugging.
+- native local/chat/global variable editing for debugging, with MacroLab-authored keys separated from discovered preset/extension state.
 
 ### Pipette
 
@@ -22,13 +22,14 @@ Pipette is the contextual editor surface. A compact MacroLab launcher is mounted
 - every macro reference detected in that field;
 - which references are registered MacroLab macros;
 - which are inline `pick`/`random` nodes;
-- registered macro decision counts;
+- registered macro decision counts and instance labels;
 - one-click insertion of registered macros;
-- a jump back to the full MacroLab definition editor.
+- contextual creation of missing definitions and create-and-insert flows;
+- contextual editing without requiring a trip through the full drawer.
 
 Current forge mounts:
 
-- `world_book_entry_toolbar`
+- World Book: prefers `lorebook_workspace`, falls back to `world_book_entry_toolbar`
 - `preset_editor_toolbar`
 - `loom_builder_toolbar`
 - `prompt_variables_toolbar`
@@ -37,7 +38,7 @@ Pipette deliberately refuses to guess when several text editors are visible and 
 
 ### Hot Plate
 
-Hot Plate is the runtime chat-state surface. Its launcher lives at `chat_input_tools_right` and shows a badge for committed decisions in the active chat.
+Hot Plate is the runtime chat-state surface. Its launcher prefers `chat_toolbar` (with `chat_input_tools_right` as a compatibility fallback) and shows a badge for committed decisions in the active chat.
 
 Hot Plate groups decisions by macro + instance and supports:
 
@@ -131,7 +132,7 @@ The scripts are runtime-neutral enough to work through npm as well; Bun is the e
 
 Builds intentionally emit self-contained `dist/frontend.js` and `dist/backend.js` entry files. Spindle may load an extension entry through a blob/data-style module URL, where relative imports such as `./core/decision-graph.js` have no hierarchical base and therefore cannot resolve. The modular TypeScript source remains under `src/`; the runtime entry artifacts are bundled during `bun run build`.
 
-The harness models `ctx.env` as an immutable structured-clone snapshot and rejects mutating variable calls made from a `commit:false` macro invocation. That is intentional: a test must not accidentally recreate the permissive fake environment that hid the v1 architecture bug.
+The harness models `ctx.env` as an immutable structured-clone snapshot and rejects mutating variable calls made from a `commit:false` macro invocation. That is intentional: a test must not accidentally recreate the permissive fake environment that hid the v1 architecture bug. It also verifies that pre-existing native variables remain external while variables created through MacroLab are tracked as authored metadata.
 
 ## Icons
 
@@ -146,6 +147,6 @@ The harness models `ctx.env` as an immutable structured-clone snapshot and rejec
 
 ## Status
 
-`2.0.0-alpha.2` is a forge build. The state engine, Hot Plate, Pipette, full MacroLab drawer, definition migration, and regression harness are present. Message-level provenance, source-aware lorebook names, richer host workspaces, and regenerate-after-reroll are intentionally left for subsequent welds rather than guessed into the first rewrite.
+`2.0.0-alpha.3` is a forge build. The state engine, Hot Plate, Pipette, full MacroLab drawer, definition migration, and regression harness are present. Message-level provenance, source-aware lorebook names, richer host workspaces, and regenerate-after-reroll are intentionally left for subsequent welds rather than guessed into the first rewrite.
 
 MacroLab is an independent, unofficial extension designed to interoperate with Lumiverse. It is not affiliated with, endorsed by, or supported by the Lumiverse project.
