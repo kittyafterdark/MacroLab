@@ -17,7 +17,7 @@ The full drawer is the workshop. It contains:
 
 ### Pipette
 
-Pipette is the contextual editor surface. A compact MacroLab launcher is mounted into supported editor toolbars. When opened, Pipette samples the last focused editable field and shows:
+Pipette is the contextual editor surface. A compact MacroLab launcher is mounted into supported editor surfaces. When opened, Pipette resolves the editable field inside that surface and shows:
 
 - every macro reference detected in that field;
 - which references are registered MacroLab macros;
@@ -29,16 +29,15 @@ Pipette is the contextual editor surface. A compact MacroLab launcher is mounted
 
 Current forge mounts:
 
-- World Book: prefers `lorebook_workspace`, falls back to `world_book_entry_toolbar`
-- `preset_editor_toolbar`
-- `loom_builder_toolbar`
-- `prompt_variables_toolbar`
+- World Book: `world_book_entry_editor`, at the top of an expanded entry
+- Loom/preset editing: `loom_builder_toolbar` only (one launcher across list/edit flows)
+- Prompt variables: `prompt_variables_toolbar`
 
-Pipette deliberately refuses to guess when several text editors are visible and none has been focused. Focus the field first, then open Pipette.
+Pipette scopes target discovery to the surface that launched it. A single local textarea can be inferred; otherwise focus the intended field first and Pipette will fail closed rather than touching an unrelated editor.
 
 ### Hot Plate
 
-Hot Plate is the runtime chat-state surface. Its launcher prefers `chat_toolbar` (with `chat_input_tools_right` as a compatibility fallback) and shows a badge for committed decisions in the active chat.
+Hot Plate is the runtime chat-state surface. Its launcher lives on `chat_actions`, the composer action row, and shows a badge for committed decisions in the active chat. Hot Plate also exposes direct `+ New macro` creation instead of requiring a trip through the drawer.
 
 Hot Plate groups decisions by macro + instance and supports:
 

@@ -7,13 +7,12 @@ The first forge deliberately uses only a small subset of the available Spindle m
 | Surface | Mount | Purpose |
 | --- | --- | --- |
 | MacroLab | drawer tab | full authoring, Resolution preview, raw state + native variables |
-| Hot Plate | `chat_toolbar` (fallback: `chat_input_tools_right`) | compact runtime launcher; badge reflects committed active-chat decisions |
-| Pipette | `lorebook_workspace` (fallback: `world_book_entry_toolbar`) | inspect/create/edit/insert macros in the focused World Book entry field |
-| Pipette | `preset_editor_toolbar` | inspect/insert macros in the focused preset field |
-| Pipette | `loom_builder_toolbar` | inspect/insert macros in the focused Loom builder field |
+| Hot Plate | `chat_actions` | compact runtime launcher on the same composer action row as native/custom actions; badge reflects committed active-chat decisions |
+| Pipette | `world_book_entry_editor` | inspect/create/edit/insert macros at the top of the expanded World Book entry editor |
+| Pipette | `loom_builder_toolbar` | one Loom launcher for both list/edit flows, avoiding the overlapping preset-toolbar double mount |
 | Pipette | `prompt_variables_toolbar` | inspect/insert macros in the focused prompt-variable field |
 
-The closed launchers all use the canonical beaker mark. The opened surfaces reveal their semantic variant: Pipette or Hot Plate.
+Closed launchers share a small stroke-only Pipette mark so host tinting stays legible. The larger custom Pipette/Hot Plate artwork is reserved for opened surfaces.
 
 ## Deliberately deferred
 
@@ -30,9 +29,9 @@ Likely future uses, once backed by actual behavior:
 
 ## Pipette targeting
 
-Canonical mounts provide a location to render extension UI but do not, in the forge contract, hand MacroLab the semantic text field being edited. Pipette therefore keeps the last focused `textarea`, textual `input`, or `contenteditable` element.
+Canonical mounts provide a location to render extension UI but do not, in the forge contract, hand MacroLab the semantic text field being edited. Pipette therefore resolves inside the launcher surface first: the active World Book entry, Loom drawer, or prompt-variable modal. It keeps the last focused editable only when that field belongs to the same surface, and prefers a lone visible textarea when the surface contains several controls.
 
-If that target is gone and exactly one visible editable field exists, it can be inferred. If several are visible, Pipette fails closed and asks the user to focus one rather than mutating an ambiguous editor.
+If the local target is still ambiguous, Pipette fails closed and asks the user to focus the intended field rather than mutating an unrelated editor.
 
 ## Contextual authoring
 

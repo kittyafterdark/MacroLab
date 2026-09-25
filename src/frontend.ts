@@ -4,6 +4,7 @@ import {
   MACROLAB_BEAKER_ICON,
   MACROLAB_COAT_ICON,
   MACROLAB_HOT_PLATE_ICON,
+  MACROLAB_LAUNCHER_ICON,
   MACROLAB_PIPETTE_ICON,
 } from './icons.js'
 import type {
@@ -20,16 +21,20 @@ type Cleanup = () => void
 
 type EditableTarget = HTMLTextAreaElement | HTMLInputElement | HTMLElement
 
+type SurfaceTarget = 'world-book-entry' | 'loom' | 'prompt-variables'
+
 type SurfaceSpec = {
-  points: string[]
+  point: string
   label: string
+  target: SurfaceTarget
 }
 
+const HOT_PLATE_MOUNT_POINT = 'chat_actions'
+
 const PIPETTE_SURFACES: SurfaceSpec[] = [
-  { points: ['lorebook_workspace', 'world_book_entry_toolbar'], label: 'World Book entry' },
-  { points: ['preset_editor_toolbar'], label: 'Preset editor' },
-  { points: ['loom_builder_toolbar'], label: 'Loom builder' },
-  { points: ['prompt_variables_toolbar'], label: 'Prompt variables' },
+  { point: 'world_book_entry_editor', label: 'World Book entry', target: 'world-book-entry' },
+  { point: 'loom_builder_toolbar', label: 'Loom preset', target: 'loom' },
+  { point: 'prompt_variables_toolbar', label: 'Prompt variables', target: 'prompt-variables' },
 ]
 
 const MACRO_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]*$/
@@ -103,9 +108,18 @@ function editableText(target: EditableTarget): string {
 function targetLabel(target: EditableTarget): string {
   const explicit = target.getAttribute('aria-label') || target.getAttribute('name') || target.getAttribute('placeholder')
   if (explicit?.trim()) return explicit.trim().slice(0, 90)
-  if (target instanceof HTMLTextAreaElement) return 'textarea'
-  if (target instanceof HTMLInputElement) return 'text field'
-  return 'editable field'
+
+  let ancestor: HTMLElement | null = target.parentElement
+  for (let depth = 0; ancestor && depth < 3; depth += 1, ancestor = ancestor.parentElement) {
+    const label = Array.from(ancestor.children).find((child) => child instanceof HTMLLabelElement) as HTMLLabelElement | undefined
+    if (label?.textContent?.trim()) return label.textContent.trim().slice(0, 90)
+    const nestedLabel = ancestor.querySelector<HTMLElement>(':scope > div > label')
+    if (nestedLabel?.textContent?.trim()) return nestedLabel.textContent.trim().slice(0, 90)
+  }
+
+  if (target instanceof HTMLTextAreaElement) return 'Content'
+  if (target instanceof HTMLInputElement) return 'Text field'
+  return 'Editable field'
 }
 
 function insertIntoEditable(target: EditableTarget, text: string): void {
@@ -135,8 +149,8 @@ function insertIntoEditable(target: EditableTarget, text: string): void {
   target.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }))
 }
 
-function visibleEditableCandidates(): EditableTarget[] {
-  return Array.from(document.querySelectorAll<HTMLElement>('textarea, input, [contenteditable="true"], [contenteditable=""]'))
+function visibleEditableCandidates(root: ParentNode = document): EditableTarget[] {
+  return Array.from(root.querySelectorAll<HTMLElement>('textarea, input, [contenteditable="true"], [contenteditable=""]'))
     .filter(isEditable)
     .filter((node) => {
       const rect = node.getBoundingClientRect()
@@ -214,8 +228,14 @@ export function setup(ctx: any): Cleanup {
     .ml-icon-button { appearance:none; position:relative; display:inline-grid; place-items:center; width:30px; height:30px; min-width:30px; padding:4px; border:1px solid var(--lumiverse-border,rgba(127,127,127,.28)); border-radius:8px; background:var(--lumiverse-fill,rgba(127,127,127,.08)); color:inherit; cursor:pointer; }
     .ml-icon { display:grid; place-items:center; width:100%; height:100%; }
     .ml-icon svg { width:100%; height:100%; display:block; }
-    .ml-launcher { width:30px; height:30px; border-radius:8px; }
-    .ml-launcher .ml-icon { width:23px; height:23px; }
+    .ml-launcher { width:28px; height:28px; min-width:28px; padding:5px; border:0; border-radius:7px; background:transparent; color:inherit; opacity:.82; }
+    .ml-launcher:hover:not(:disabled), .ml-launcher:focus-visible { opacity:1; background:var(--lumiverse-fill,rgba(127,127,127,.12)); }
+    .ml-launcher:focus-visible { outline:1px solid var(--lumiverse-primary,currentColor); outline-offset:1px; }
+    .ml-launcher .ml-icon { width:18px; height:18px; }
+    [data-spindle-mount="chat_actions"] > [data-spindle-extension-root],
+    [data-spindle-mount="loom_builder_toolbar"] > [data-spindle-extension-root],
+    [data-spindle-mount="prompt_variables_toolbar"] > [data-spindle-extension-root] { display:inline-flex; align-items:center; }
+    [data-spindle-mount="world_book_entry_editor"] > [data-spindle-extension-root] { display:flex; justify-content:flex-end; align-items:center; padding:0 0 6px; }
     .ml-badge { position:absolute; right:-5px; top:-6px; display:grid; place-items:center; min-width:16px; height:16px; padding:0 4px; border-radius:999px; background:var(--lumiverse-primary,currentColor); color:var(--lumiverse-primary-foreground,Canvas); font:800 9px/1 system-ui,sans-serif; box-shadow:0 0 0 2px var(--lumiverse-background,Canvas); }
     .ml-badge[data-zero="true"] { display:none; }
     .ml-input, .ml-editor, .ml-output { width:100%; margin:0; padding:9px 10px; border:1px solid var(--lumiverse-border,rgba(127,127,127,.3)); border-radius:9px; background:var(--lumiverse-fill,rgba(0,0,0,.12)); color:inherit; font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace; }
@@ -235,8 +255,8 @@ export function setup(ctx: any): Cleanup {
     .ml-instance { display:flex; flex-direction:column; gap:7px; }
     .ml-instance + .ml-instance { border-top:1px solid var(--lumiverse-border,rgba(127,127,127,.2)); padding-top:11px; }
     .ml-surface-header { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
-    .ml-surface-icon { width:44px; height:44px; flex:0 0 44px; }
-    .ml-surface-icon svg { width:100%; height:100%; display:block; }
+    .ml-surface-icon { width:44px; height:44px; flex:0 0 44px; display:grid; place-items:center; padding:5px; overflow:hidden; border:1px solid var(--lumiverse-border,rgba(127,127,127,.22)); border-radius:12px; background:var(--lumiverse-fill-subtle,rgba(127,127,127,.08)); color:var(--lumiverse-text,#f4f4f5); }
+    .ml-surface-icon svg { width:100%; height:100%; display:block; color:inherit; }
     .ml-modal { display:flex; flex-direction:column; gap:11px; padding:2px 0 4px; color:var(--lumiverse-text,inherit); }
     .ml-notice { padding:8px 9px; border-radius:8px; background:var(--lumiverse-fill-subtle,rgba(127,127,127,.08)); border:1px solid var(--lumiverse-border,rgba(127,127,127,.2)); font-size:10px; line-height:1.45; }
     .ml-status[data-kind="error"] { color:var(--lumiverse-danger,#d96a6a); }
@@ -284,10 +304,39 @@ export function setup(ctx: any): Cleanup {
   document.addEventListener('focusin', onFocusIn, true)
   cleanups.push(() => document.removeEventListener('focusin', onFocusIn, true))
 
-  const resolveEditable = (): EditableTarget | null => {
-    if (lastEditable?.isConnected) return lastEditable
-    const candidates = visibleEditableCandidates()
+  const resolveEditable = (root: ParentNode = document): EditableTarget | null => {
+    const rootNode = root instanceof Node ? root : null
+    if (lastEditable?.isConnected && (!rootNode || rootNode.contains(lastEditable))) return lastEditable
+    const candidates = visibleEditableCandidates(root)
+    const textareas = candidates.filter((candidate): candidate is HTMLTextAreaElement => candidate instanceof HTMLTextAreaElement)
+    if (textareas.length === 1) return textareas[0]
     return candidates.length === 1 ? candidates[0] : null
+  }
+
+  const resolveSurfaceEditable = (surface: SurfaceSpec, launcher: HTMLButtonElement): EditableTarget | null => {
+    const extensionRoot = launcher.closest<HTMLElement>('[data-spindle-extension-root]')
+    const anchor = extensionRoot?.parentElement?.matches(`[data-spindle-mount="${surface.point}"]`)
+      ? extensionRoot.parentElement
+      : document.querySelector<HTMLElement>(`[data-spindle-mount="${surface.point}"]`)
+
+    let surfaceRoot: HTMLElement | null = null
+    if (surface.target === 'world-book-entry') {
+      surfaceRoot = anchor?.closest<HTMLElement>('[data-world-book-entry-editor="true"]') ?? null
+    } else if (surface.target === 'loom') {
+      surfaceRoot = anchor?.closest<HTMLElement>('[data-spindle-drawer-tab="loom"]') ?? null
+    } else if (surface.target === 'prompt-variables') {
+      surfaceRoot = anchor?.parentElement?.parentElement ?? null
+    }
+
+    if (!surfaceRoot) return null
+
+    const rootNode = surfaceRoot as Node
+    if (lastEditable?.isConnected && rootNode.contains(lastEditable)) return lastEditable
+    const candidates = visibleEditableCandidates(surfaceRoot)
+    const textareas = candidates.filter((candidate): candidate is HTMLTextAreaElement => candidate instanceof HTMLTextAreaElement)
+    if (textareas.length === 1) return textareas[0]
+    if (surface.target === 'prompt-variables' && candidates.length === 1) return candidates[0]
+    return null
   }
 
   // Drawer: MacroLab ------------------------------------------------------
@@ -800,15 +849,20 @@ export function setup(ctx: any): Cleanup {
     copy.append(el('strong', 'ml-title', 'Hot Plate'), el('div', 'ml-meta', latestState?.context ? `${latestState.context.name} · live committed state` : 'No active chat'))
     header.append(copy)
     const toolbar = el('div', 'ml-actions')
+    const createMacro = button('+ New macro', 'ml-button-primary')
     const refresh = button('Refresh')
     const openLab = button('Open MacroLab')
+    createMacro.addEventListener('click', () => {
+      hotPlateModal?.dismiss?.()
+      openSurfaceMacroForm()
+    })
     refresh.addEventListener('click', () => refreshState(false))
     openLab.addEventListener('click', () => {
       hotPlateModal?.dismiss()
       tab.activate()
       switchDrawer('state')
     })
-    toolbar.append(refresh, openLab)
+    toolbar.append(createMacro, refresh, openLab)
     const list = el('div', 'ml-grid')
     renderDecisionGroups(list, latestState, true)
     body.append(header, toolbar, list)
@@ -830,17 +884,17 @@ export function setup(ctx: any): Cleanup {
   }
 
   const launcherNodes: Array<{ button: HTMLButtonElement; badge?: HTMLElement }> = []
-  const mountLauncher = (point: string, label: string, onClick: () => void, withBadge = false): HTMLButtonElement | null => {
+  const mountLauncher = (point: string, label: string, onClick: (button: HTMLButtonElement) => void, withBadge = false): HTMLButtonElement | null => {
     try {
       const host = ctx.ui.mount(point)
-      const node = iconButton(MACROLAB_BEAKER_ICON, label, 'ml-launcher')
+      const node = iconButton(MACROLAB_LAUNCHER_ICON, label, 'ml-launcher')
       let badge: HTMLElement | undefined
       if (withBadge) {
         badge = el('span', 'ml-badge', '0')
         badge.dataset.zero = 'true'
         node.append(badge)
       }
-      node.addEventListener('click', onClick)
+      node.addEventListener('click', () => onClick(node))
       host.append(node)
       launcherNodes.push({ button: node, badge })
       cleanups.push(() => node.remove())
@@ -851,19 +905,13 @@ export function setup(ctx: any): Cleanup {
     }
   }
 
-  const mountFirstAvailable = (points: string[], label: string, onClick: () => void, withBadge = false): HTMLButtonElement | null => {
-    for (const point of points) {
-      const mounted = mountLauncher(point, label, onClick, withBadge)
-      if (mounted) return mounted
-    }
-    return null
-  }
-
-  // Hot Plate is chat-wide state, so prefer the chat toolbar rather than sitting beside Send.
-  mountFirstAvailable(['chat_toolbar', 'chat_input_tools_right'], 'Open MacroLab Hot Plate', openHotPlate, true)
+  // The action-row mount is the actual composer control strip. The old chat_toolbar
+  // point is a second row below it, which made Hot Plate look detached from Send.
+  mountLauncher(HOT_PLATE_MOUNT_POINT, 'Open MacroLab Hot Plate', () => openHotPlate(), true)
 
   // Pipette ---------------------------------------------------------------
-  const renderPipette = (surfaceLabel: string) => {
+  const renderPipette = (surface: SurfaceSpec, launcher: HTMLButtonElement) => {
+    const surfaceLabel = surface.label
     if (!pipetteModal) return
     const root = pipetteModal.root as HTMLElement
     root.replaceChildren()
@@ -874,7 +922,7 @@ export function setup(ctx: any): Cleanup {
     headerCopy.append(el('strong', 'ml-title', 'Pipette'), el('div', 'ml-meta', `Contextual macro inspection · ${surfaceLabel}`))
     header.append(headerCopy)
 
-    const target = resolveEditable()
+    const target = resolveSurfaceEditable(surface, launcher)
     if (!target) {
       body.append(header, el('div', 'ml-empty', 'Focus the text field you want to inspect, then open Pipette again. If several editors are visible, MacroLab refuses to guess which one you meant.'))
       root.append(body)
@@ -912,7 +960,7 @@ export function setup(ctx: any): Cleanup {
     const targetCard = el('section', 'ml-card')
     targetCard.append(
       el('h2', 'ml-label', 'Current surface'),
-      el('div', 'ml-title', `${surfaceLabel} · Content`),
+      el('div', 'ml-title', `${surfaceLabel} · ${targetLabel(target)}`),
       el('div', 'ml-meta', `${text.length.toLocaleString()} characters · ${refs.length} macro reference${refs.length === 1 ? '' : 's'}`),
     )
 
@@ -975,7 +1023,7 @@ export function setup(ctx: any): Cleanup {
       insert.addEventListener('click', () => {
         insertIntoEditable(target, `{{${macro.name}}}`)
         lastEditable = target
-        renderPipette(surfaceLabel)
+        renderPipette(surface, launcher)
       })
       edit.addEventListener('click', () => openSurfaceMacroForm({ definition: macro }))
       actions.append(insert, edit)
@@ -987,7 +1035,7 @@ export function setup(ctx: any): Cleanup {
     root.append(body)
   }
 
-  const openPipette = (surfaceLabel: string) => {
+  const openPipette = (surface: SurfaceSpec, launcher: HTMLButtonElement) => {
     hotPlateModal?.dismiss?.()
     if (pipetteModal) pipetteModal.dismiss()
     pipetteModal = ctx.ui.showModal({ title: 'Pipette', width: 610, maxHeight: 760 })
@@ -995,13 +1043,13 @@ export function setup(ctx: any): Cleanup {
       pipetteModal = null
       pipetteRender = null
     })
-    pipetteRender = () => renderPipette(surfaceLabel)
-    renderPipette(surfaceLabel)
+    pipetteRender = () => renderPipette(surface, launcher)
+    renderPipette(surface, launcher)
     refreshState()
   }
 
   for (const surface of PIPETTE_SURFACES) {
-    mountFirstAvailable(surface.points, `Open MacroLab Pipette for ${surface.label}`, () => openPipette(surface.label))
+    mountLauncher(surface.point, `Open MacroLab Pipette for ${surface.label}`, (launcher) => openPipette(surface, launcher))
   }
 
   // Backend messages ------------------------------------------------------

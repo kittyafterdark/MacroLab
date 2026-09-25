@@ -1,0 +1,18 @@
+{
+  "chat_actions": {
+    "scope": "chat:mock:actions",
+    "region": "composer action bar"
+  },
+  "world_book_entry_editor": {
+    "scope": "world-book-entry:mock:editor",
+    "region": "entry editor before field body"
+  },
+  "loom_builder_toolbar": {
+    "scope": "loom:mock:builder-toolbar",
+    "region": "Loom main toolbar"
+  },
+  "prompt_variables_toolbar": {
+    "scope": "prompt-variables:mock:toolbar",
+    "region": "prompt variable modal header"
+  }
+}
