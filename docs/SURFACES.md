@@ -9,7 +9,7 @@ The first forge deliberately uses only a small subset of the available Spindle m
 | MacroLab | drawer tab | full authoring, Resolution preview, raw state + native variables |
 | Hot Plate | `chat_actions` | compact runtime launcher on the same composer action row as native/custom actions; badge reflects committed active-chat decisions |
 | Pipette | `world_book_entry_editor` | inspect/create/edit/insert macros at the top of the expanded World Book entry editor |
-| Pipette | `loom_builder_toolbar` | one Loom launcher for both list/edit flows, avoiding the overlapping preset-toolbar double mount |
+| Pipette | `loom_block_editor_actions` | dedicated compact block-editor launcher beside Back; the general `loom_builder_toolbar` remains untouched for row-sized extension UI |
 | Pipette | `prompt_variables_toolbar` | inspect/insert macros in the focused prompt-variable field |
 
 Closed launchers share a small stroke-only Pipette mark so host tinting stays legible. The larger custom Pipette/Hot Plate artwork is reserved for opened surfaces.
@@ -29,7 +29,7 @@ Likely future uses, once backed by actual behavior:
 
 ## Pipette targeting
 
-Canonical mounts provide a location to render extension UI but do not, in the forge contract, hand MacroLab the semantic text field being edited. Pipette therefore resolves inside the launcher surface first: the active World Book entry, Loom drawer, or prompt-variable modal. It keeps the last focused editable only when that field belongs to the same surface, and prefers a lone visible textarea when the surface contains several controls.
+Canonical mounts provide a location to render extension UI but do not, in the forge contract, hand MacroLab the semantic text field being edited. Pipette therefore resolves inside the launcher surface first: the active World Book entry, Loom block editor, or prompt-variable modal. It keeps the last focused editable only when that field belongs to the same surface, and prefers a lone visible textarea when the surface contains several controls.
 
 If the local target is still ambiguous, Pipette fails closed and asks the user to focus the intended field rather than mutating an unrelated editor.
 

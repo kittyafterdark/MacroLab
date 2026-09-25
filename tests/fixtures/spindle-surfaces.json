@@ -7,12 +7,12 @@
     "scope": "world-book-entry:mock:editor",
     "region": "entry editor before field body"
   },
-  "loom_builder_toolbar": {
-    "scope": "loom:mock:builder-toolbar",
-    "region": "Loom main toolbar"
-  },
   "prompt_variables_toolbar": {
     "scope": "prompt-variables:mock:toolbar",
     "region": "prompt variable modal header"
+  },
+  "loom_block_editor_actions": {
+    "scope": "loom:mock:block-editor-actions",
+    "region": "Loom block editor leading action cluster"
   }
 }

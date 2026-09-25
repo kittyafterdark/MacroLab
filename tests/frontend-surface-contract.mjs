@@ -17,7 +17,7 @@ assert(surfaceBlock, 'Pipette surface registry must be statically discoverable')
 const pipettePoints = [...surfaceBlock[1].matchAll(/point: '([^']+)'/g)].map((match) => match[1])
 assert.deepEqual(
   pipettePoints,
-  ['world_book_entry_editor', 'loom_builder_toolbar', 'prompt_variables_toolbar'],
+  ['world_book_entry_editor', 'loom_block_editor_actions', 'prompt_variables_toolbar'],
   'Pipette should have one non-overlapping launcher per supported editing surface',
 )
 assert.equal(new Set(pipettePoints).size, pipettePoints.length, 'Pipette mount points must not duplicate')
@@ -29,5 +29,8 @@ assert(!surfaceBlock[1].includes('lorebook_workspace'), 'World Book launcher mus
 assert(source.includes("iconButton(MACROLAB_LAUNCHER_ICON, label, 'ml-launcher')"), 'closed launchers should share the compact pipette icon')
 assert(source.includes("button('+ New macro', 'ml-button-primary')"), 'Hot Plate must expose direct macro creation')
 assert(source.includes('resolveSurfaceEditable(surface, launcher)'), 'Pipette must resolve its field from the launcher surface')
+assert(source.includes("label: 'Loom block'"), 'Loom Pipette should describe the block editor rather than the preset list')
+assert(!source.includes('data-loom-block-editor-toolbar'), 'MacroLab should not depend on a private Loom host marker')
+assert(!source.includes('[data-spindle-mount="loom_builder_toolbar"]'), 'MacroLab must not consume the general-purpose Loom builder toolbar')
 
 console.log('frontend surface contract: ok')

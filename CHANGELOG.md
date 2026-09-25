@@ -4,8 +4,11 @@
 
 ### Surface UX
 
-- Moves the Hot Plate launcher to `chat_toolbar`, with `chat_input_tools_right` retained only as a fail-closed fallback when the toolbar mount is unavailable.
-- Prefers `lorebook_workspace` for the World Book Pipette launcher, falling back to `world_book_entry_toolbar` for hosts/layouts that do not expose the workspace mount.
+- Moves Hot Plate onto `chat_actions`, the actual composer action row, and gives it direct `+ New macro` creation.
+- Moves World Book Pipette to `world_book_entry_editor`, so it follows the active expanded entry instead of living below the whole form.
+- Uses the dedicated `loom_block_editor_actions` Pipette launcher in the native block editor and labels the surface as a Loom block.
+- Keeps the general-purpose `loom_builder_toolbar` completely untouched so row-sized extensions retain their existing placement and geometry.
+- Replaces oversized/tint-sensitive closed artwork with the compact stroke Pipette mark while keeping the full Pipette and Hot Plate art inside their modals.
 - Replaces DOM-flavored `textarea` / `text field` labels with semantic surface copy such as `World Book entry · Content`.
 - Pipette now preserves registered macro instances such as `backstory · dan` instead of collapsing every invocation to the macro name.
 - Pipette can create missing MacroLab definitions directly from an unregistered reference, create-and-insert a new macro, and edit registered definitions without bouncing through the drawer.
