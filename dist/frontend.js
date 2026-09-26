@@ -199,7 +199,6 @@ const HOT_PLATE_MOUNT_POINT = 'chat_actions';
 const PIPETTE_SURFACES = [
     { point: 'world_book_entry_editor', label: 'World Book entry', target: 'world-book-entry' },
     { point: 'loom_block_editor_actions', label: 'Loom block', target: 'loom' },
-    { point: 'prompt_variables_toolbar', label: 'Prompt variables', target: 'prompt-variables' },
 ];
 const MACRO_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]*$/;
 const COMMON_NATIVE_MACROS = new Set([
@@ -395,8 +394,7 @@ export function setup(ctx) {
     .ml-launcher:focus-visible { outline:1px solid var(--lumiverse-primary,currentColor); outline-offset:1px; }
     .ml-launcher .ml-icon { width:18px; height:18px; }
     [data-spindle-mount="chat_actions"] > [data-spindle-extension-root],
-    [data-spindle-mount="loom_block_editor_actions"] > [data-spindle-extension-root],
-    [data-spindle-mount="prompt_variables_toolbar"] > [data-spindle-extension-root] { display:inline-flex; align-items:center; }
+    [data-spindle-mount="loom_block_editor_actions"] > [data-spindle-extension-root] { display:inline-flex; align-items:center; }
     [data-spindle-mount="world_book_entry_editor"] > [data-spindle-extension-root] { display:flex; justify-content:flex-end; align-items:center; padding:0 0 6px; }
     .ml-badge { position:absolute; right:-5px; top:-6px; display:grid; place-items:center; min-width:16px; height:16px; padding:0 4px; border-radius:999px; background:var(--lumiverse-primary,currentColor); color:var(--lumiverse-primary-foreground,Canvas); font:800 9px/1 system-ui,sans-serif; box-shadow:0 0 0 2px var(--lumiverse-background,Canvas); }
     .ml-badge[data-zero="true"] { display:none; }
@@ -487,9 +485,6 @@ export function setup(ctx) {
         else if (surface.target === 'loom') {
             surfaceRoot = anchor?.closest('[data-spindle-drawer-tab="loom"]') ?? null;
         }
-        else if (surface.target === 'prompt-variables') {
-            surfaceRoot = anchor?.parentElement?.parentElement ?? null;
-        }
         if (!surfaceRoot)
             return null;
         const rootNode = surfaceRoot;
@@ -499,8 +494,6 @@ export function setup(ctx) {
         const textareas = candidates.filter((candidate) => candidate instanceof HTMLTextAreaElement);
         if (textareas.length === 1)
             return textareas[0];
-        if (surface.target === 'prompt-variables' && candidates.length === 1)
-            return candidates[0];
         return null;
     };
     // Drawer: MacroLab ------------------------------------------------------

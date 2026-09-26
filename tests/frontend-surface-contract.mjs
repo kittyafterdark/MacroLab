@@ -17,12 +17,13 @@ assert(surfaceBlock, 'Pipette surface registry must be statically discoverable')
 const pipettePoints = [...surfaceBlock[1].matchAll(/point: '([^']+)'/g)].map((match) => match[1])
 assert.deepEqual(
   pipettePoints,
-  ['world_book_entry_editor', 'loom_block_editor_actions', 'prompt_variables_toolbar'],
+  ['world_book_entry_editor', 'loom_block_editor_actions'],
   'Pipette should have one non-overlapping launcher per supported editing surface',
 )
 assert.equal(new Set(pipettePoints).size, pipettePoints.length, 'Pipette mount points must not duplicate')
 for (const point of pipettePoints) assert(fixture[point], `mock host is missing ${point}`)
 
+assert(!surfaceBlock[1].includes('prompt_variables_toolbar'), 'Prompt Variables has no macro-editable text surface, so Pipette must not mount there')
 assert(!surfaceBlock[1].includes('preset_editor_toolbar'), 'Loom must not mount both preset + builder launchers in edit mode')
 assert(!surfaceBlock[1].includes('world_book_entry_toolbar'), 'World Book launcher must not live below the full entry form')
 assert(!surfaceBlock[1].includes('lorebook_workspace'), 'World Book launcher must follow the entry editor itself')

@@ -7,6 +7,7 @@
 - Moves Hot Plate onto `chat_actions`, the actual composer action row, and gives it direct `+ New macro` creation.
 - Moves World Book Pipette to `world_book_entry_editor`, so it follows the active expanded entry instead of living below the whole form.
 - Uses the dedicated `loom_block_editor_actions` Pipette launcher in the native block editor and labels the surface as a Loom block.
+- Removes the Prompt Variables Pipette launcher because that modal has variable controls, not a macro-editable text surface.
 - Keeps the general-purpose `loom_builder_toolbar` completely untouched so row-sized extensions retain their existing placement and geometry.
 - Replaces oversized/tint-sensitive closed artwork with the compact stroke Pipette mark while keeping the full Pipette and Hot Plate art inside their modals.
 - Replaces DOM-flavored `textarea` / `text field` labels with semantic surface copy such as `World Book entry · Content`.

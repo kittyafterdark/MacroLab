@@ -31,7 +31,8 @@ Current forge mounts:
 
 - World Book: `world_book_entry_editor`, at the top of an expanded entry
 - Loom block editing: `loom_block_editor_actions`, a dedicated compact action socket beside Back in the native block-editor header
-- Prompt variables: `prompt_variables_toolbar`
+
+Prompt Variables intentionally has no Pipette launcher: its modal exposes variable controls rather than a macro-editable text surface.
 
 Pipette scopes target discovery to the surface that launched it. A single local textarea can be inferred; otherwise focus the intended field first and Pipette will fail closed rather than touching an unrelated editor.
 
