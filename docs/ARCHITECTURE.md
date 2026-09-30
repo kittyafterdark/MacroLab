@@ -1,12 +1,14 @@
 # MacroLab 2 architecture
 
-MacroLab is split conceptually into three layers even though the forge build keeps the runtime compact.
+MacroLab is split conceptually into three layers even though the runtime stays compact.
 
 ## 1. Resolution and decision graph
 
 `src/core/decision-graph.ts` is host-agnostic. It finds stochastic nodes, derives human labels, computes context-derived decision identities, scans arbitrary macro references for Pipette, and instruments registered macro bodies with MacroLab's internal sticky handlers.
 
 The graph does not persist anything and does not know about chat ids.
+
+The frontend reuses the same graph scanner for the Library **Recipe** view. That keeps authoring feedback aligned with the backend rather than inventing a second parser in the UI.
 
 ## 2. State model and operations
 
@@ -25,13 +27,20 @@ A decision stores:
 
 `src/backend.ts` is the only layer that talks to host persistence. All UI operations route through the same backend operations rather than implementing rerolls independently per surface.
 
+### Draft preview
+
+`macrolab:preview_macro` exists specifically for authoring. The backend instruments the current unsaved body with MacroLab's sticky handlers, then resolves it with `commit:false`. This makes Library/Pipette previews faithful to the eventual registered macro behavior without allowing a test roll to create canon.
+
 ## 3. Surfaces
 
 `src/frontend.ts` presents the same engine in three densities:
 
-- **MacroLab**: global authoring/debugging.
-- **Pipette**: contextual editor inspection and insertion.
-- **Hot Plate**: active chat state manipulation.
+- **MacroLab → Library**: definition authoring, Recipe inspection, and in-place non-committing preview.
+- **MacroLab → Chat State**: committed macro decisions first; native variables live behind an Advanced disclosure.
+- **Pipette**: contextual editor inspection, insertion, creation, editing, and draft preview.
+- **Hot Plate**: compact active-chat decision controls from the composer action row.
+
+The removed top-level Resolution page was an implementation-oriented debugging workflow. Preview now lives with the macro being authored, which is the actual user task.
 
 Fixed mount adapters are intentionally thin. A toolbar mount creates only a launcher; the actual surface lives in a host modal or drawer. This keeps editor chrome clean and prevents MacroLab from treating every canonical mount point as an invitation to occupy space.
 
@@ -56,6 +65,10 @@ missing value + commit false (or no chat id)
 ```
 
 Reads are allowed during previews; writes are not attempted.
+
+## Current boundary: no message provenance yet
+
+MacroLab currently knows active-chat decision state, not which specific assistant message consumed which decision revision. Rerolls therefore affect subsequent resolutions and do not rewrite/regenerate an existing assistant response. Message-level provenance plus regenerate-after-reroll remains a separate future engine weld rather than being faked in the UX.
 
 ## Clean extension identity
 

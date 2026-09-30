@@ -206,6 +206,76 @@ const COMMON_NATIVE_MACROS = new Set([
     'pick', 'random', 'getvar', 'setvar', 'getchatvar', 'setchatvar',
     'getglobalvar', 'setglobalvar', 'getlocalvar', 'setlocalvar',
 ]);
+const MACROLAB_GUIDE = `# MacroLab
+
+MacroLab turns reusable prompt fragments into **chat-scoped, controllable choices**. The shortest useful loop is: **build a macro → test it → insert it into a prompt → generate → inspect the committed choices in Chat State / Hot Plate**.
+
+## Five-minute tutorial
+
+### 1. Create one small macro
+Open **Library**, choose **New macro**, name it \`origin\`, and use this body:
+
+\`\`\`text
+Born {{pick::normally::from a ritual::from the sea}}.
+\`\`\`
+
+The **Recipe** section should detect one sticky choice.
+
+### 2. Test it before saving
+Choose **Test preview**. MacroLab uses the real resolver, but preview runs with \`commit:false\`: sampled values are temporary and **do not become chat canon**. Roll the preview again as much as you want.
+
+### 3. Put the macro somewhere Lumi will resolve it
+Save the macro, then insert \`{{origin}}\` into a Loom block or World Book entry. Pipette can insert registered macros directly from those editors.
+
+### 4. Generate once
+When a real generation resolves the macro, MacroLab commits its stochastic choices to the active chat. The same macro instance will keep using those values until you reroll or reset them.
+
+### 5. Open Chat State / Hot Plate
+You should now see \`origin · default\` and its committed choice. **Reroll** changes what future generations will use. **Lock** keeps a choice fixed. **Reset** forgets it so the next committing generation rolls again.
+
+> Rerolling state does not rewrite an assistant message that already exists. It changes the state used by future generations.
+
+## Preview vs committed state
+
+- **Preview:** temporary test roll; nothing new is saved. Existing committed choices are still honored.
+- **Generation:** committing resolve; new choices are stored in the active chat.
+- **Hot Plate / Chat State:** controls the committed values that future generations will reuse.
+
+## Instances
+
+Use \`{{origin::alice}}\` and \`{{origin::bob}}\` when the same macro needs independent sticky state. Without arguments, the instance is \`default\`.
+
+## Nested choices
+
+MacroLab gives every \`pick\` / \`random\` node a stable decision ID. The Recipe view shows the possible decision graph; Chat State shows only choices that actually became committed state.
+
+## Pipette
+
+Pipette appears only on supported text-editing surfaces. It inspects the current field, shows macro references already present, and can insert or create registered macros without leaving the editor.
+
+## Advanced variables
+
+The **Advanced variables** section in Chat State exposes native Lumi local/chat/global variables. MacroLab's own decision storage stays hidden there and is managed through Chat State / Hot Plate instead.
+`;
+function recipeNodes(body) {
+    const stochasticRefs = scanMacroReferences(body).filter((ref) => {
+        const name = ref.name.toLowerCase();
+        return name === 'pick' || name === 'random';
+    });
+    const descriptors = scanDecisionDescriptors(body);
+    return stochasticRefs.map((ref, index) => {
+        const end = ref.offset + ref.raw.length;
+        let depth = 0;
+        for (const parent of stochasticRefs) {
+            if (parent === ref)
+                continue;
+            const parentEnd = parent.offset + parent.raw.length;
+            if (parent.offset < ref.offset && parentEnd >= end)
+                depth += 1;
+        }
+        return { descriptor: descriptors[index], depth, raw: ref.raw };
+    }).filter((node) => Boolean(node.descriptor));
+}
 function requestId() {
     if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
         return crypto.randomUUID();
@@ -347,11 +417,12 @@ export function setup(ctx) {
     let quickMacroStatus = null;
     let quickMacroSaveButton = null;
     let pendingQuickMacroSave = null;
+    let pendingQuickMacroPreview = null;
     let pipetteRender = null;
     let hotPlateRender = null;
-    let pendingResolve = '';
+    let pendingMacroPreview = '';
     const pendingState = new Set();
-    let drawerSection = 'macros';
+    let drawerSection = 'library';
     let editingMacroName = null;
     const removeStyle = ctx.dom.addStyle(`
     .ml-root, .ml-root * { box-sizing: border-box; }
@@ -364,7 +435,7 @@ export function setup(ctx) {
     .ml-hero-copy strong { font-size:14px; }
     .ml-muted { color:var(--lumiverse-text-muted,color-mix(in srgb,currentColor 66%,transparent)); }
     .ml-small { font-size:11px; line-height:1.45; }
-    .ml-tabs { display:grid; grid-template-columns:repeat(3,1fr); gap:5px; padding:4px; position:sticky; top:0; z-index:5; backdrop-filter:blur(12px); background:var(--lumiverse-fill-subtle,rgba(127,127,127,.08)); border:1px solid var(--lumiverse-border,rgba(127,127,127,.22)); border-radius:12px; }
+    .ml-tabs { display:grid; grid-template-columns:repeat(2,1fr); gap:5px; padding:4px; position:sticky; top:0; z-index:5; backdrop-filter:blur(12px); background:var(--lumiverse-fill-subtle,rgba(127,127,127,.08)); border:1px solid var(--lumiverse-border,rgba(127,127,127,.22)); border-radius:12px; }
     .ml-tab { appearance:none; border:0; border-radius:8px; padding:8px 9px; background:transparent; color:inherit; font:inherit; font-size:11px; font-weight:750; cursor:pointer; }
     .ml-tab[aria-selected="true"] { background:var(--lumiverse-fill,rgba(127,127,127,.18)); box-shadow:0 0 0 1px var(--lumiverse-border,rgba(127,127,127,.22)); }
     .ml-panel { display:flex; flex-direction:column; gap:11px; }
@@ -426,6 +497,16 @@ export function setup(ctx) {
     .ml-ref { display:flex; gap:8px; align-items:flex-start; padding:8px; border-radius:8px; background:var(--lumiverse-fill,rgba(127,127,127,.05)); border:1px solid var(--lumiverse-border,rgba(127,127,127,.18)); }
     .ml-ref-count { min-width:24px; text-align:center; }
     .ml-diagnostics { margin:0; padding:9px 9px 9px 25px; border:1px solid var(--lumiverse-border,rgba(127,127,127,.22)); border-radius:9px; font-size:10px; line-height:1.45; }
+    .ml-recipe { display:flex; flex-direction:column; gap:6px; }
+    .ml-recipe-row { display:flex; align-items:flex-start; gap:8px; padding:7px 8px; border-radius:8px; background:var(--lumiverse-fill,rgba(127,127,127,.045)); border:1px solid var(--lumiverse-border,rgba(127,127,127,.16)); }
+    .ml-recipe-row[data-depth="1"] { margin-left:14px; }
+    .ml-recipe-row[data-depth="2"] { margin-left:28px; }
+    .ml-recipe-row[data-depth="3"] { margin-left:42px; }
+    .ml-preview-output { white-space:pre-wrap; overflow-wrap:anywhere; min-height:68px; margin:0; padding:10px; border-radius:9px; background:var(--lumiverse-fill,rgba(0,0,0,.16)); border:1px solid var(--lumiverse-border,rgba(127,127,127,.18)); font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono",monospace; }
+    .ml-advanced { border:1px solid var(--lumiverse-border,rgba(127,127,127,.2)); border-radius:10px; overflow:hidden; }
+    .ml-advanced > summary { cursor:pointer; list-style:none; display:flex; align-items:center; justify-content:space-between; gap:8px; padding:9px 10px; font-size:10px; font-weight:800; }
+    .ml-advanced > summary::-webkit-details-marker { display:none; }
+    .ml-advanced-body { display:flex; flex-direction:column; gap:9px; padding:0 10px 10px; }
     .ml-variable-scope { display:flex; flex-direction:column; gap:6px; }
     .ml-variable-row { display:flex; align-items:flex-start; gap:8px; padding:7px 0; border-top:1px solid var(--lumiverse-border,rgba(127,127,127,.14)); }
     .ml-variable-row:first-of-type { border-top:0; }
@@ -448,7 +529,7 @@ export function setup(ctx) {
     cleanups.push(removeStyle);
     const send = (payload, statusText) => {
         const id = requestId();
-        if (payload.type !== 'macrolab:resolve')
+        if (payload.type !== 'macrolab:resolve' && payload.type !== 'macrolab:preview_macro')
             pendingState.add(id);
         ctx.sendToBackend({ ...payload, requestId: id });
         if (statusText)
@@ -500,33 +581,34 @@ export function setup(ctx) {
     const tab = ctx.ui.registerDrawerTab({
         id: 'macro_lab',
         title: 'MacroLab',
-        shortName: 'Macros',
+        shortName: 'MacroLab',
         headerTitle: 'MacroLab',
-        description: 'Author registered macros, preview resolution, and inspect raw state.',
-        keywords: ['macro', 'pick', 'random', 'reroll', 'hot plate', 'pipette', 'variables', 'resolution'],
+        description: 'Build reusable macros and control the sticky choices they commit to a chat.',
+        keywords: ['macro', 'pick', 'random', 'reroll', 'hot plate', 'pipette', 'variables', 'chat state'],
         iconSvg: MACROLAB_BEAKER_ICON,
+        guide: {
+            title: 'MacroLab tutorial',
+            markdown: MACROLAB_GUIDE,
+        },
     });
     cleanups.push(() => tab.destroy());
     const shell = el('section', 'ml-root ml-shell');
     const hero = el('section', 'ml-hero');
     const heroIcon = iconMarkup(MACROLAB_COAT_ICON, 'ml-hero-icon');
     const heroCopy = el('div', 'ml-hero-copy');
-    heroCopy.append(el('strong', '', 'MacroLab'), el('span', 'ml-muted ml-small', 'Build the recipe here. Pipette inspects editors; Hot Plate holds live chat state.'));
+    heroCopy.append(el('strong', '', 'MacroLab'), el('span', 'ml-muted ml-small', 'Build a macro, test it here, then let real generations commit its choices to Chat State.'));
     hero.append(heroIcon, heroCopy);
     const nav = el('div', 'ml-tabs');
     const navButtons = {
-        macros: button('Macros', 'ml-tab'),
-        resolution: button('Resolution', 'ml-tab'),
-        state: button('State', 'ml-tab'),
+        library: button('Library', 'ml-tab'),
+        state: button('Chat State', 'ml-tab'),
     };
     for (const [key, node] of Object.entries(navButtons)) {
-        node.setAttribute('aria-selected', String(key === 'macros'));
+        node.setAttribute('aria-selected', String(key === 'library'));
         nav.append(node);
     }
     const macrosPanel = el('section', 'ml-panel');
-    const resolutionPanel = el('section', 'ml-panel');
     const statePanel = el('section', 'ml-panel');
-    resolutionPanel.hidden = true;
     statePanel.hidden = true;
     const status = el('div', 'ml-status ml-small ml-muted', 'Loading MacroLab…');
     status.setAttribute('aria-live', 'polite');
@@ -536,21 +618,20 @@ export function setup(ctx) {
     };
     const switchDrawer = (section) => {
         drawerSection = section;
-        macrosPanel.hidden = section !== 'macros';
-        resolutionPanel.hidden = section !== 'resolution';
+        macrosPanel.hidden = section !== 'library';
         statePanel.hidden = section !== 'state';
         for (const [key, node] of Object.entries(navButtons))
             node.setAttribute('aria-selected', String(key === section));
-        if (section !== 'resolution')
-            refreshState();
+        refreshState();
     };
-    navButtons.macros.addEventListener('click', () => switchDrawer('macros'));
-    navButtons.resolution.addEventListener('click', () => switchDrawer('resolution'));
+    navButtons.library.addEventListener('click', () => switchDrawer('library'));
     navButtons.state.addEventListener('click', () => switchDrawer('state'));
-    // Macro authoring
+    // Macro authoring -------------------------------------------------------
     const macrosToolbar = el('div', 'ml-heading');
-    macrosToolbar.append(el('div', 'ml-grow', ''), button('+ New macro', 'ml-button-primary'));
-    const newMacroButton = macrosToolbar.querySelector('button');
+    const libraryIntro = el('div', 'ml-grow');
+    libraryIntro.append(el('strong', 'ml-title', 'Macro library'), el('div', 'ml-meta', 'Reusable prompt fragments. Test rolls are temporary; real generations create sticky chat state.'));
+    const newMacroButton = button('+ New macro', 'ml-button-primary');
+    macrosToolbar.append(libraryIntro, newMacroButton);
     const macroForm = el('section', 'ml-card');
     macroForm.hidden = true;
     const macroName = el('input', 'ml-input');
@@ -559,26 +640,77 @@ export function setup(ctx) {
     macroDescription.placeholder = 'Optional description';
     const macroBody = el('textarea', 'ml-editor ml-editor-large');
     macroBody.spellcheck = false;
-    macroBody.placeholder = 'Born in {{pick::a coastal city::a mountain village}}…';
+    macroBody.placeholder = 'Born {{pick::normally::from a ritual::from the sea}}.';
+    const macroSummary = el('div', 'ml-small ml-muted');
+    const recipeCard = el('section', 'ml-card ml-card-flat');
+    const recipeHeading = el('div', 'ml-heading');
+    const recipeCount = el('span', 'ml-pill', '0 decisions');
+    recipeHeading.append(el('h2', 'ml-label', 'Recipe'), recipeCount);
+    const recipeList = el('div', 'ml-recipe');
+    recipeCard.append(recipeHeading, recipeList);
+    const previewCard = el('section', 'ml-card ml-card-flat');
+    const previewHeading = el('div', 'ml-heading');
+    previewHeading.append(el('h2', 'ml-label', 'Test preview'));
+    const previewNote = el('div', 'ml-notice', 'Preview uses the real MacroLab resolver with commit:false. New rolls here are temporary and never become chat canon.');
+    const macroPreviewOutput = el('pre', 'ml-preview-output', 'Run a preview to see this macro resolve without committing new state.');
+    const macroPreviewDiagnostics = el('ol', 'ml-diagnostics');
+    macroPreviewDiagnostics.hidden = true;
+    const previewActions = el('div', 'ml-actions');
+    const previewMacro = button('Test preview', 'ml-button-primary');
+    const copyMacroPreview = button('Copy');
+    copyMacroPreview.disabled = true;
+    previewActions.append(previewMacro, copyMacroPreview);
+    previewCard.append(previewHeading, previewNote, macroPreviewOutput, macroPreviewDiagnostics, previewActions);
     const macroFormActions = el('div', 'ml-actions');
     const saveMacro = button('Save macro', 'ml-button-primary');
     const cancelMacro = button('Cancel');
     macroFormActions.append(saveMacro, cancelMacro);
-    const macroPreview = el('div', 'ml-small ml-muted');
-    macroForm.replaceChildren((() => { const f = el('div', 'ml-field'); f.append(el('label', '', 'Macro name'), macroName); return f; })(), (() => { const f = el('div', 'ml-field'); f.append(el('label', '', 'Description'), macroDescription); return f; })(), (() => { const f = el('div', 'ml-field'); f.append(el('label', '', 'Macro body'), macroBody); return f; })(), macroPreview, macroFormActions);
+    macroForm.replaceChildren((() => { const f = el('div', 'ml-field'); f.append(el('label', '', 'Macro name'), macroName); return f; })(), (() => { const f = el('div', 'ml-field'); f.append(el('label', '', 'Description'), macroDescription); return f; })(), (() => { const f = el('div', 'ml-field'); f.append(el('label', '', 'Macro body'), macroBody); return f; })(), macroSummary, recipeCard, previewCard, macroFormActions);
     const macroList = el('div', 'ml-grid');
     const macrosCard = el('section', 'ml-card');
     const macroHeading = el('div', 'ml-heading');
-    macroHeading.append(el('h2', 'ml-label', 'Registered macros'), el('span', 'ml-small ml-muted', 'Reusable · sticky nested pick/random'));
+    macroHeading.append(el('h2', 'ml-label', 'Registered macros'), el('span', 'ml-small ml-muted', 'Edit, inspect, or insert a saved definition'));
     macrosCard.append(macroHeading, macroList);
     macrosPanel.append(macrosToolbar, macroForm, macrosCard);
+    const resetMacroPreview = () => {
+        pendingMacroPreview = '';
+        previewMacro.disabled = false;
+        previewMacro.textContent = 'Test preview';
+        macroPreviewOutput.textContent = 'Run a preview to see this macro resolve without committing new state.';
+        macroPreviewDiagnostics.replaceChildren();
+        macroPreviewDiagnostics.hidden = true;
+        copyMacroPreview.disabled = true;
+    };
+    const renderRecipe = () => {
+        const nodes = recipeNodes(macroBody.value);
+        const refs = scanMacroReferences(macroBody.value);
+        const nestedMacros = refs.filter((ref) => !['pick', 'random'].includes(ref.name.toLowerCase())).length;
+        macroSummary.textContent = `${macroBody.value.length.toLocaleString()} characters · ${nodes.length} sticky decision${nodes.length === 1 ? '' : 's'} · ${nestedMacros} other macro reference${nestedMacros === 1 ? '' : 's'}`;
+        recipeCount.textContent = `${nodes.length} decision${nodes.length === 1 ? '' : 's'}`;
+        recipeList.replaceChildren();
+        if (!nodes.length) {
+            recipeList.append(el('div', 'ml-empty', 'No sticky pick/random nodes yet. Plain macros are fine; add a stochastic node when you want chat-scoped choices.'));
+            return;
+        }
+        for (const node of nodes) {
+            const row = el('div', 'ml-recipe-row');
+            row.dataset.depth = String(Math.min(node.depth, 3));
+            const main = el('div', 'ml-grow');
+            const line = el('div', 'ml-inline');
+            line.append(el('strong', 'ml-title', node.descriptor.label), el('span', 'ml-pill', node.descriptor.kind));
+            main.append(line, el('div', 'ml-meta ml-code', node.raw.length > 120 ? `${node.raw.slice(0, 117)}…` : node.raw));
+            row.append(main);
+            recipeList.append(row);
+        }
+    };
     const openMacroForm = (definition) => {
         editingMacroName = definition?.name ?? null;
         macroName.value = definition?.name ?? '';
         macroDescription.value = definition?.description ?? '';
         macroBody.value = definition?.body ?? '';
         macroForm.hidden = false;
-        updateMacroPreview();
+        resetMacroPreview();
+        renderRecipe();
         macroName.focus();
     };
     const closeMacroForm = () => {
@@ -587,15 +719,58 @@ export function setup(ctx) {
         macroName.value = '';
         macroDescription.value = '';
         macroBody.value = '';
+        resetMacroPreview();
     };
-    const updateMacroPreview = () => {
-        const refs = scanMacroReferences(macroBody.value);
-        const stochastic = refs.filter((ref) => ref.name.toLowerCase() === 'pick' || ref.name.toLowerCase() === 'random').length;
-        macroPreview.textContent = `${macroBody.value.length.toLocaleString()} characters · ${stochastic} inline stochastic reference${stochastic === 1 ? '' : 's'}`;
-    };
-    macroBody.addEventListener('input', updateMacroPreview);
+    macroBody.addEventListener('input', () => {
+        renderRecipe();
+        if (macroPreviewOutput.textContent !== 'Run a preview to see this macro resolve without committing new state.') {
+            macroPreviewOutput.textContent = 'Body changed. Run another preview to test the current draft.';
+            copyMacroPreview.disabled = true;
+        }
+    });
     newMacroButton.addEventListener('click', () => openMacroForm());
     cancelMacro.addEventListener('click', closeMacroForm);
+    const doMacroPreview = () => {
+        const name = macroName.value.trim();
+        if (!name || !macroBody.value.trim()) {
+            setDrawerStatus('Give the macro a name and body before testing it.', 'error');
+            return;
+        }
+        if (!MACRO_NAME_RE.test(name)) {
+            setDrawerStatus('Names must start with a letter and contain only letters, numbers, _ or -.', 'error');
+            return;
+        }
+        pendingMacroPreview = requestId();
+        previewMacro.disabled = true;
+        previewMacro.textContent = 'Previewing…';
+        setDrawerStatus('Rolling a temporary preview. Nothing new will be committed.', 'idle');
+        ctx.sendToBackend({
+            type: 'macrolab:preview_macro',
+            requestId: pendingMacroPreview,
+            name,
+            body: macroBody.value,
+        });
+    };
+    previewMacro.addEventListener('click', doMacroPreview);
+    macroBody.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+            event.preventDefault();
+            doMacroPreview();
+        }
+    });
+    copyMacroPreview.addEventListener('click', async () => {
+        const text = macroPreviewOutput.textContent ?? '';
+        try {
+            if (navigator.clipboard?.writeText)
+                await navigator.clipboard.writeText(text);
+            else if (!copyTextFallback(text))
+                throw new Error('copy failed');
+            setDrawerStatus('Copied preview output.', 'success');
+        }
+        catch {
+            setDrawerStatus('Clipboard copy failed; select the preview manually.', 'error');
+        }
+    });
     saveMacro.addEventListener('click', () => {
         const name = macroName.value.trim();
         if (!name || !macroBody.value.trim()) {
@@ -630,22 +805,51 @@ export function setup(ctx) {
         bodyInput.spellcheck = false;
         bodyInput.placeholder = 'Born in {{pick::a coastal city::a mountain village}}…';
         bodyInput.value = definition?.body ?? '';
-        const preview = el('div', 'ml-small ml-muted');
+        const previewSummary = el('div', 'ml-small ml-muted');
         const statusLine = el('div', 'ml-small ml-muted ml-feedback');
         statusLine.setAttribute('aria-live', 'polite');
         quickMacroStatus = statusLine;
+        const quickOutput = el('pre', 'ml-preview-output', 'Optional: test this draft before saving. Preview never commits new chat state.');
+        const quickDiagnostics = el('ol', 'ml-diagnostics');
+        quickDiagnostics.hidden = true;
         const updatePreview = () => {
+            const nodes = recipeNodes(bodyInput.value);
             const refs = scanMacroReferences(bodyInput.value);
-            const stochastic = refs.filter((ref) => ['pick', 'random'].includes(ref.name.toLowerCase())).length;
-            preview.textContent = `${bodyInput.value.length.toLocaleString()} characters · ${stochastic} inline stochastic reference${stochastic === 1 ? '' : 's'}`;
+            const otherRefs = refs.filter((ref) => !['pick', 'random'].includes(ref.name.toLowerCase())).length;
+            previewSummary.textContent = `${bodyInput.value.length.toLocaleString()} characters · ${nodes.length} sticky decision${nodes.length === 1 ? '' : 's'} · ${otherRefs} other macro reference${otherRefs === 1 ? '' : 's'}`;
+            if (pendingQuickMacroPreview)
+                return;
+            if (quickOutput.textContent !== 'Optional: test this draft before saving. Preview never commits new chat state.') {
+                quickOutput.textContent = 'Draft changed. Run another preview to test the current body.';
+            }
         };
         bodyInput.addEventListener('input', updatePreview);
         updatePreview();
         const actions = el('div', 'ml-actions');
+        const test = button('Test preview');
         const save = button(definition ? 'Save changes' : 'Create macro', 'ml-button-primary');
         quickMacroSaveButton = save;
         const cancel = button('Cancel');
-        actions.append(save, cancel);
+        actions.append(test, save, cancel);
+        test.addEventListener('click', () => {
+            const name = nameInput.value.trim();
+            if (!name || !bodyInput.value.trim()) {
+                statusLine.textContent = 'Give the macro a name and body before testing it.';
+                statusLine.dataset.kind = 'error';
+                return;
+            }
+            if (!MACRO_NAME_RE.test(name)) {
+                statusLine.textContent = 'Names must start with a letter and contain only letters, numbers, _ or -.';
+                statusLine.dataset.kind = 'error';
+                return;
+            }
+            test.disabled = true;
+            statusLine.textContent = 'Rolling temporary preview…';
+            statusLine.dataset.kind = 'idle';
+            const id = requestId();
+            pendingQuickMacroPreview = { requestId: id, output: quickOutput, diagnostics: quickDiagnostics, button: test, status: statusLine };
+            ctx.sendToBackend({ type: 'macrolab:preview_macro', requestId: id, name, body: bodyInput.value });
+        });
         cancel.addEventListener('click', () => quickMacroModal?.dismiss?.());
         save.addEventListener('click', () => {
             const name = nameInput.value.trim();
@@ -673,11 +877,12 @@ export function setup(ctx) {
             wrapper.append(el('label', '', label), control);
             return wrapper;
         };
-        form.append(header, field('Macro name', nameInput), field('Description', descriptionInput), field('Macro body', bodyInput), preview, statusLine, actions);
+        form.append(header, field('Macro name', nameInput), field('Description', descriptionInput), field('Macro body', bodyInput), previewSummary, quickOutput, quickDiagnostics, statusLine, actions);
         root.replaceChildren(form);
         quickMacroModal.onDismiss(() => {
             if (pendingQuickMacroSave)
                 pendingQuickMacroSave.afterSave = undefined;
+            pendingQuickMacroPreview = null;
             if (returnTarget?.isConnected)
                 lastEditable = returnTarget;
             quickMacroModal = null;
@@ -686,77 +891,26 @@ export function setup(ctx) {
         });
         nameInput.focus();
     };
-    // Resolution
-    const resolutionIntro = el('div', 'ml-notice', 'Preview mode uses the real macro resolver with commit:false. Existing Hot Plate state is honored; missing choices are sampled ephemerally and never become canon.');
-    const resolutionInputCard = el('section', 'ml-card');
-    const resolutionEditor = el('textarea', 'ml-editor ml-editor-large');
-    resolutionEditor.spellcheck = false;
-    resolutionEditor.placeholder = '{{backstory::alice}}\n\nHello {{user}}, I am {{char}}.';
-    const resolveActions = el('div', 'ml-actions');
-    const resolveButton = button('Preview resolution', 'ml-button-primary');
-    const clearResolution = button('Clear');
-    resolveActions.append(resolveButton, clearResolution);
-    resolutionInputCard.append(el('h2', 'ml-label', 'Input'), resolutionEditor, resolveActions);
-    const resolutionOutputCard = el('section', 'ml-card');
-    const outputHeading = el('div', 'ml-heading');
-    const copyOutput = button('Copy');
-    copyOutput.disabled = true;
-    outputHeading.append(el('h2', 'ml-label', 'Resolved output'), copyOutput);
-    const resolutionOutput = el('pre', 'ml-output', 'Resolved output appears here.');
-    const diagnostics = el('ol', 'ml-diagnostics');
-    diagnostics.hidden = true;
-    resolutionOutputCard.append(outputHeading, resolutionOutput, diagnostics);
-    resolutionPanel.append(resolutionIntro, resolutionInputCard, resolutionOutputCard);
-    const doResolve = () => {
-        if (!resolutionEditor.value.trim()) {
-            setDrawerStatus('Give Resolution something to chew on first.', 'error');
-            return;
-        }
-        pendingResolve = requestId();
-        resolveButton.disabled = true;
-        setDrawerStatus('Previewing without commit…', 'idle');
-        ctx.sendToBackend({ type: 'macrolab:resolve', requestId: pendingResolve, template: resolutionEditor.value });
-    };
-    resolveButton.addEventListener('click', doResolve);
-    resolutionEditor.addEventListener('keydown', (event) => {
-        if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
-            event.preventDefault();
-            doResolve();
-        }
-    });
-    clearResolution.addEventListener('click', () => {
-        resolutionEditor.value = '';
-        resolutionOutput.textContent = 'Resolved output appears here.';
-        diagnostics.hidden = true;
-        copyOutput.disabled = true;
-    });
-    copyOutput.addEventListener('click', async () => {
-        const text = resolutionOutput.textContent ?? '';
-        try {
-            if (navigator.clipboard?.writeText)
-                await navigator.clipboard.writeText(text);
-            else if (!copyTextFallback(text))
-                throw new Error('copy failed');
-            setDrawerStatus('Copied resolved output.', 'success');
-        }
-        catch {
-            setDrawerStatus('Clipboard copy failed; select the output manually.', 'error');
-        }
-    });
-    // Raw State page
+    // Chat State ------------------------------------------------------------
     const stateContext = el('div', 'ml-notice', 'No active chat loaded yet.');
     const rawDecisionList = el('div', 'ml-grid');
     const variableList = el('div', 'ml-grid');
     const stateRefresh = button('Refresh');
     stateRefresh.addEventListener('click', () => refreshState(false));
     const stateTop = el('div', 'ml-heading');
-    stateTop.append(el('h2', 'ml-label', 'Active chat state'), stateRefresh);
+    const stateHeadingCopy = el('div', 'ml-grow');
+    stateHeadingCopy.append(el('h2', 'ml-label', 'Committed chat state'), el('div', 'ml-meta', 'These are the sticky choices real generations have committed. Rerolls affect future generations; existing messages are not rewritten.'));
+    stateTop.append(stateHeadingCopy, stateRefresh);
     const rawStateCard = el('section', 'ml-card');
     rawStateCard.append(stateTop, stateContext, rawDecisionList);
-    const varsCard = el('section', 'ml-card');
-    varsCard.append(el('h2', 'ml-label', 'Native variables'), el('div', 'ml-small ml-muted', 'Advanced view. MacroLab v2 decision variables are intentionally hidden from this list.'), variableList);
-    statePanel.append(rawStateCard, varsCard);
-    shell.append(hero, nav, macrosPanel, resolutionPanel, statePanel, status);
+    const advancedVariables = el('details', 'ml-advanced');
+    const advancedSummary = el('summary');
+    advancedSummary.append(el('span', '', 'Advanced variables'), el('span', 'ml-pill', 'debug / power user'));
+    const advancedBody = el('div', 'ml-advanced-body');
+    advancedBody.append(el('div', 'ml-small ml-muted', 'Native Lumi local/chat/global variables. MacroLab decision storage is intentionally hidden here and managed above.'), variableList);
+    advancedVariables.append(advancedSummary, advancedBody);
+    statePanel.append(rawStateCard, advancedVariables);
+    shell.append(hero, nav, macrosPanel, statePanel, status);
     tab.root.append(shell);
     // Shared state actions ---------------------------------------------------
     const decisionAction = (key, action, busy = 'Updating decision…') => {
@@ -782,7 +936,7 @@ export function setup(ctx) {
             return;
         }
         if (!state.decisions.length) {
-            container.append(el('div', 'ml-empty', 'Nothing committed yet. Generate with a registered MacroLab macro and the choices will appear here.'));
+            container.append(el('div', 'ml-empty', 'No committed MacroLab choices yet. Test previews are temporary; insert a saved macro into a prompt and run a real generation to create Chat State.'));
             return;
         }
         for (const [, items] of groupedDecisions(state)) {
@@ -790,7 +944,7 @@ export function setup(ctx) {
             const group = el('section', 'ml-instance');
             const heading = el('div', 'ml-heading');
             const left = el('div', 'ml-grow');
-            left.append(el('div', 'ml-title ml-code', `${first.macroName} · ${first.instance}`), el('div', 'ml-meta', `${items.length} decision${items.length === 1 ? '' : 's'} · ${items.filter((item) => item.state.locked).length} locked`));
+            left.append(el('div', 'ml-title ml-code', `${first.macroName} · ${first.instance}`), el('div', 'ml-meta', `${items.length} committed decision${items.length === 1 ? '' : 's'} · ${items.filter((item) => item.state.locked).length} locked`));
             const groupActions = el('div', 'ml-actions');
             const rerollAll = button('↻ Unlocked');
             const resetAll = button('Reset');
@@ -837,7 +991,7 @@ export function setup(ctx) {
         macroList.replaceChildren();
         const macros = state?.macros ?? [];
         if (!macros.length) {
-            macroList.append(el('div', 'ml-empty', 'No registered macros yet. Make one here, then use it from cards, lorebooks, presets, or anywhere Lumi resolves macros.'));
+            macroList.append(el('div', 'ml-empty', 'No macros yet. Create one, test it in place, then insert it into Loom or a World Book entry. The drawer guide has a five-minute tutorial.'));
             return;
         }
         for (const definition of macros) {
@@ -849,9 +1003,14 @@ export function setup(ctx) {
             const meta = el('div', 'ml-meta', `${definition.body.length.toLocaleString()} chars · ${definition.fingerprint} · updated ${friendlyTimestamp(definition.updatedAt)}`);
             main.append(title, desc, meta);
             const actions = el('div', 'ml-decision-actions');
+            const test = button('Test');
             const insert = button('Insert');
             const edit = button('Edit');
             const remove = button('Delete', 'ml-button-danger');
+            test.addEventListener('click', () => {
+                openMacroForm(definition);
+                doMacroPreview();
+            });
             insert.addEventListener('click', () => {
                 const target = resolveEditable();
                 if (!target) {
@@ -872,7 +1031,7 @@ export function setup(ctx) {
                 if (result?.confirmed)
                     send({ type: 'macrolab:delete_macro', name: definition.name }, 'Deleting macro…');
             });
-            actions.append(insert, edit, remove);
+            actions.append(test, insert, edit, remove);
             card.append(main, actions);
             macroList.append(card);
         }
@@ -977,7 +1136,7 @@ export function setup(ctx) {
         const header = el('div', 'ml-surface-header');
         header.append(iconMarkup(MACROLAB_HOT_PLATE_ICON, 'ml-surface-icon'));
         const copy = el('div', 'ml-grow');
-        copy.append(el('strong', 'ml-title', 'Hot Plate'), el('div', 'ml-meta', latestState?.context ? `${latestState.context.name} · live committed state` : 'No active chat'));
+        copy.append(el('strong', 'ml-title', 'Hot Plate'), el('div', 'ml-meta', latestState?.context ? `${latestState.context.name} · committed choices for future generations` : 'No active chat'));
         header.append(copy);
         const toolbar = el('div', 'ml-actions');
         const createMacro = button('+ New macro', 'ml-button-primary');
@@ -1196,7 +1355,7 @@ export function setup(ctx) {
         updateLaunchers();
         if (state.notice)
             setDrawerStatus(state.notice, 'success');
-        else if (drawerSection !== 'resolution')
+        else
             setDrawerStatus('State refreshed.', 'success');
         if (!macroForm.hidden && editingMacroName) {
             const stillExists = state.macros.some((macro) => macro.name === editingMacroName);
@@ -1211,18 +1370,34 @@ export function setup(ctx) {
             return;
         if (payload.type === 'macrolab:result') {
             const result = payload;
-            if (result.requestId !== pendingResolve)
+            if (pendingQuickMacroPreview?.requestId === result.requestId) {
+                const pending = pendingQuickMacroPreview;
+                pendingQuickMacroPreview = null;
+                pending.button.disabled = false;
+                pending.button.textContent = 'Roll preview again';
+                pending.output.textContent = result.text || '(empty output)';
+                pending.diagnostics.replaceChildren();
+                for (const diagnostic of result.diagnostics ?? []) {
+                    pending.diagnostics.append(el('li', '', `${diagnostic.message} · offset ${diagnostic.offset}`));
+                }
+                pending.diagnostics.hidden = !result.diagnostics?.length;
+                pending.status.textContent = `Preview complete${result.context ? ` in ${result.context.name}` : ''}. Nothing new was committed.`;
+                pending.status.dataset.kind = 'success';
                 return;
-            pendingResolve = '';
-            resolveButton.disabled = false;
-            resolutionOutput.textContent = result.text;
-            copyOutput.disabled = result.text.length === 0;
-            diagnostics.replaceChildren();
+            }
+            if (result.requestId !== pendingMacroPreview)
+                return;
+            pendingMacroPreview = '';
+            previewMacro.disabled = false;
+            previewMacro.textContent = 'Roll preview again';
+            macroPreviewOutput.textContent = result.text || '(empty output)';
+            copyMacroPreview.disabled = result.text.length === 0;
+            macroPreviewDiagnostics.replaceChildren();
             for (const diagnostic of result.diagnostics ?? []) {
                 const item = el('li', '', `${diagnostic.message} · offset ${diagnostic.offset}`);
-                diagnostics.append(item);
+                macroPreviewDiagnostics.append(item);
             }
-            diagnostics.hidden = !result.diagnostics?.length;
+            macroPreviewDiagnostics.hidden = !result.diagnostics?.length;
             setDrawerStatus(`Preview complete${result.context ? ` in ${result.context.name}` : ''}. Nothing new was committed.`, 'success');
             return;
         }
@@ -1236,9 +1411,18 @@ export function setup(ctx) {
         }
         if (payload.type === 'macrolab:error') {
             const failure = payload;
-            if (failure.requestId === pendingResolve) {
-                pendingResolve = '';
-                resolveButton.disabled = false;
+            if (pendingQuickMacroPreview?.requestId === failure.requestId) {
+                const pending = pendingQuickMacroPreview;
+                pendingQuickMacroPreview = null;
+                pending.button.disabled = false;
+                pending.button.textContent = 'Test preview';
+                pending.status.textContent = failure.error;
+                pending.status.dataset.kind = 'error';
+            }
+            if (failure.requestId === pendingMacroPreview) {
+                pendingMacroPreview = '';
+                previewMacro.disabled = false;
+                previewMacro.textContent = 'Test preview';
             }
             pendingState.delete(failure.requestId);
             if (pendingQuickMacroSave?.requestId === failure.requestId) {

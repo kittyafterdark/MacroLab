@@ -1,5 +1,27 @@
 # Changelog
 
+## 2.0.0-alpha.4 — Usage convergence
+
+### Product workflow
+
+- Replaces the implementation-shaped `Macros | Resolution | State` drawer with `Library | Chat State`.
+- Moves preview into the macro authoring form so a draft can be written, inspected, tested, and saved in one place.
+- Adds a Recipe view using the same decision scanner as the backend, including nesting-aware stochastic rows.
+- Adds direct `Test` from registered macro cards and contextual draft preview inside Pipette's create/edit form.
+- Makes preview-vs-commit semantics explicit: preview is temporary; real generations create sticky chat state.
+- Moves native local/chat/global variables under an `Advanced variables` disclosure.
+- Rewrites first-run and empty-state copy around the actual usage loop instead of backend concepts.
+
+### Tutorial
+
+- Registers a native Spindle drawer guide with a five-minute create → preview → insert → generate → reroll tutorial.
+- Adds `docs/USAGE.md` with the same workflow plus instances, nested choices, Pipette targeting, and the current message-provenance boundary.
+
+### Preview contract
+
+- Adds `macrolab:preview_macro` for unsaved drafts. The backend instruments the draft with MacroLab decision handlers and resolves it with `commit:false`.
+- Adds harness coverage proving draft preview fully resolves while writing zero new decision state.
+
 ## 2.0.0-alpha.3 — Contextual surface weld
 
 ### Surface UX

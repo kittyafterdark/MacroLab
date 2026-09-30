@@ -856,13 +856,26 @@ spindle.onFrontendMessage(async (payload: unknown, userId: string) => {
     await ready
     await ensureRegistryLoaded(userId)
 
-    if (request.type === 'macrolab:resolve') {
-      if (request.template.length > MAX_TEMPLATE_LENGTH) throw new Error(`Input is too large. Preview is limited to ${MAX_TEMPLATE_LENGTH.toLocaleString()} characters.`)
+    if (request.type === 'macrolab:resolve' || request.type === 'macrolab:preview_macro') {
       const { activeChat, variables } = await activeContext(userId)
       const options: { chatId?: string; characterId?: string; userId: string; commit: false } = { userId, commit: false }
       if (activeChat?.id) options.chatId = activeChat.id
       if (activeChat?.character_id) options.characterId = activeChat.character_id
-      const result = await spindle.macros.resolve(request.template, options)
+
+      let template: string
+      if (request.type === 'macrolab:preview_macro') {
+        const name = String(request.name ?? '').trim()
+        if (!name) throw new Error('Give the macro a name before testing it.')
+        if (!MACRO_NAME_RE.test(name)) throw new Error('Macro names must start with a letter and contain only letters, numbers, _ or -.')
+        if (request.body.length > MAX_TEMPLATE_LENGTH) throw new Error(`Macro body is too large. Preview is limited to ${MAX_TEMPLATE_LENGTH.toLocaleString()} characters.`)
+        const instance = normalizeInstance(request.instance ? [request.instance] : [])
+        template = instrumentMacroBody(request.body, name, instance, { pick: INTERNAL_PICK, random: INTERNAL_RANDOM })
+      } else {
+        if (request.template.length > MAX_TEMPLATE_LENGTH) throw new Error(`Input is too large. Preview is limited to ${MAX_TEMPLATE_LENGTH.toLocaleString()} characters.`)
+        template = request.template
+      }
+
+      const result = await spindle.macros.resolve(template, options)
       const diagnostics: MacroDiagnostic[] = Array.isArray(result?.diagnostics) ? result.diagnostics : []
       spindle.sendToFrontend({
         type: 'macrolab:result',

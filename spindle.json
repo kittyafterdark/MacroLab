@@ -1,11 +1,11 @@
 {
-  "version": "2.0.0-alpha.3",
+  "version": "2.0.0-alpha.4",
   "name": "MacroLab",
   "identifier": "macrolab",
   "author": "kittyafterdark",
   "github": "https://github.com/kittyafterdark/LumiMacroLab",
   "homepage": "https://github.com/kittyafterdark/LumiMacroLab",
-  "description": "Author reusable macros, inspect them in context with Pipette, and manipulate committed chat state from Hot Plate.",
+  "description": "Build reusable macros, test drafts in place, and control committed chat-scoped choices from Chat State and Hot Plate.",
   "permissions": [
     "chats"
   ],

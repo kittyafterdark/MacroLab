@@ -34,4 +34,12 @@ assert(source.includes("label: 'Loom block'"), 'Loom Pipette should describe the
 assert(!source.includes('data-loom-block-editor-toolbar'), 'MacroLab should not depend on a private Loom host marker')
 assert(!source.includes('[data-spindle-mount="loom_builder_toolbar"]'), 'MacroLab must not consume the general-purpose Loom builder toolbar')
 
+
+assert(source.includes("button('Library', 'ml-tab')"), 'MacroLab drawer should converge authoring under Library')
+assert(source.includes("button('Chat State', 'ml-tab')"), 'MacroLab drawer should expose committed runtime choices as Chat State')
+assert(!source.includes("button('Resolution', 'ml-tab')"), 'Resolution must not remain a top-level workflow')
+assert(source.includes("type: 'macrolab:preview_macro'"), 'macro authoring should preview the current draft in place')
+assert(source.includes('MACROLAB_GUIDE'), 'drawer registration should expose the tutorial guide')
+assert(source.includes('Advanced variables'), 'native variable inspection should stay available behind an advanced disclosure')
+
 console.log('frontend surface contract: ok')

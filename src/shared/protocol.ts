@@ -40,6 +40,14 @@ export type ResolveRequest = {
   template: string
 }
 
+export type PreviewMacroRequest = {
+  type: 'macrolab:preview_macro'
+  requestId: string
+  name: string
+  body: string
+  instance?: string
+}
+
 export type GetStateRequest = {
   type: 'macrolab:get_state'
   requestId: string
@@ -91,6 +99,7 @@ export type VariableActionRequest = {
 
 export type FrontendRequest =
   | ResolveRequest
+  | PreviewMacroRequest
   | GetStateRequest
   | SaveMacroRequest
   | DeleteMacroRequest

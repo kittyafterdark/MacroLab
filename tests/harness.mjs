@@ -236,6 +236,17 @@ assert.match(backstoryView.decisions[0].label, /Born in/i)
 assert.match(backstoryView.decisions[1].label, /raised by/i)
 assert.match(backstoryView.decisions[2].label, /At age/i)
 
+// Draft preview uses MacroLab instrumentation but must never commit new state.
+const beforeDraftPreview = decisionVars().length
+response = await request({
+  type: 'macrolab:preview_macro',
+  name: 'draftOrigin',
+  body: 'Born {{pick::normally::from a ritual::from the sea}} at age {{random::12::19}}.',
+})
+assert.equal(response.type, 'macrolab:result')
+assert(!response.text.includes('{{'), 'draft preview should fully resolve')
+assert.equal(decisionVars().length, beforeDraftPreview, 'draft preview must not persist sticky decisions')
+
 // Real commit writes directly through chat variables even though env is a frozen structured clone.
 const first = await resolveTemplate('{{backstory::alice}}', {
   chatId: 'chat-1',
