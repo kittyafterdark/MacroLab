@@ -276,9 +276,9 @@ function recipeNodes(body) {
         return { descriptor: descriptors[index], depth, raw: ref.raw };
     }).filter((node) => Boolean(node.descriptor));
 }
-function requestId() {
-    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function')
-        return crypto.randomUUID();
+function requestId(ctx) {
+    if (ctx.uuid)
+        return ctx.uuid.v4();
     return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 function el(tag, className = '', text = '') {
@@ -528,7 +528,7 @@ export function setup(ctx) {
   `);
     cleanups.push(removeStyle);
     const send = (payload, statusText) => {
-        const id = requestId();
+        const id = requestId(ctx);
         if (payload.type !== 'macrolab:resolve' && payload.type !== 'macrolab:preview_macro')
             pendingState.add(id);
         ctx.sendToBackend({ ...payload, requestId: id });
@@ -740,7 +740,7 @@ export function setup(ctx) {
             setDrawerStatus('Names must start with a letter and contain only letters, numbers, _ or -.', 'error');
             return;
         }
-        pendingMacroPreview = requestId();
+        pendingMacroPreview = requestId(ctx);
         previewMacro.disabled = true;
         previewMacro.textContent = 'Previewing…';
         setDrawerStatus('Rolling a temporary preview. Nothing new will be committed.', 'idle');
@@ -846,7 +846,7 @@ export function setup(ctx) {
             test.disabled = true;
             statusLine.textContent = 'Rolling temporary preview…';
             statusLine.dataset.kind = 'idle';
-            const id = requestId();
+            const id = requestId(ctx);
             pendingQuickMacroPreview = { requestId: id, output: quickOutput, diagnostics: quickDiagnostics, button: test, status: statusLine };
             ctx.sendToBackend({ type: 'macrolab:preview_macro', requestId: id, name, body: bodyInput.value });
         });
